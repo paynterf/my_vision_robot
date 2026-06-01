@@ -1,0 +1,67 @@
+# =============================================
+# Visual Studio / Visual Micro
+# =============================================
+.vs/
+__vm/
+obj/
+*.suo
+*.user
+*.pdb
+*.ilk
+*.cache
+
+# Teensy / Arduino Build Files
+*.bin
+*.hex
+*.elf
+*.d
+*.o
+*.lst
+*.eep
+TempSketch*
+board.txt
+TeensyOTA1.ttl
+*.vsarduino.h
+
+# =============================================
+# Python / Pi 5
+# =============================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.python-version
+
+# Virtual Environments
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# =============================================
+# General
+# =============================================
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+*.bak
+
+# =============================================
+# Embedded / Libraries (optional)
+# =============================================
+# Ignore specific large or temporary library folders if needed:
+# firmware/common/Robot Common Files 2026/FlasherX/
+
+# =============================================
+# Documentation / Notes
+# =============================================
+*.pdf
+*.docx
+*.xlsx
