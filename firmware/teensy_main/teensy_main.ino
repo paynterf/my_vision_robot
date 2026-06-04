@@ -5,12 +5,12 @@
 */
 
 #include "MPU6050_6Axis_MotionApps20.h"
-#include <FXUtil.h>
-//#include "FXUtil.h"
+//#include <FXUtil.h>
+#include "FXUtil.h"
 extern "C"
 {
-//#include "FlashTxx.h"
-#include <FlashTxx.h> //06/01/26 mvd to Arduino/Libraries
+#include "FlashTxx.h"
+//#include <FlashTxx.h> //06/01/26 mvd to Arduino/Libraries
 }
 
 MPU6050 mpu;
