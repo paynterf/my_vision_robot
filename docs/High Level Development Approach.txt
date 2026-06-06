@@ -1,0 +1,63 @@
+High-Level Overview of Vision-Enhanced 2-Wheel Robot Software Development Approach
+This is a recap of the structured, iterative approach we discussed for your vision-enhanced 2-wheel robot (built around Teensy 4.1 for low-level motor control + Raspberry Pi 5 with OAK-D Lite for high-level vision/spatial AI). The goal is a modular, maintainable codebase that supports real-time object detection/avoidance, odometry/IMU fusion, navigation in your lab space, and eventual AprilTag-based charging station homing/docking — starting with tethered testing (~1m range).
+1. Overall Architecture (Hybrid Teensy + Pi5)
+
+Teensy 4.1 (Low-Level / Real-Time): Handles motor control, Hall effect encoders (odometry), MPU6050 IMU (fusion for heading/pose), safety stops, and basic sensor loops. Uses your custom FlasherX for OTA updates. Runs at high frequency for tight control loops.
+Raspberry Pi 5 (High-Level / Vision): Runs DepthAI (with OAK-D Lite's Myriad X VPU) for spatial object detection, depth mapping, occupancy grid generation, and path planning. Communicates with Teensy via serial (UART) or other reliable link for commands and status.
+Communication: Bidirectional — Pi sends velocity/heading commands or waypoints; Teensy reports odometry/IMU data, encoder ticks, and sensor status. Start simple (text/JSON packets) and evolve to a more robust protocol if needed.
+Shared Code: Use a Teensy_Robot_Base (or similar) repo for common utilities (OTA/FlasherX, IMU fusion, motor PID, comms protocol). Individual projects (e.g., my_vision_robot) pull in the base as a submodule or library.
+
+2. Development Workflow & Tooling
+
+IDE: Stick with Visual Studio + Visual Micro for Teensy side (your preference and familiarity). Use it for C++ on Teensy. For Pi side, Python (DepthAI/OpenCV if needed) can be developed in VS as well or VS Code.
+Project Structure (custom, future-proof):
+C:\Projects\Teensy_Robot_Base\ — shared code, .gitignore tuned for Arduino/Teensy.
+C:\Projects\my_vision_robot\ (or TwoWheelRobot) — project-specific code, references base.
+Avoid default Arduino folders; use your preferred paths with clear naming.
+
+Version Control: Git (command-line now). Modular repos with submodules for base code. Commit early/often, especially after successful tethered tests.
+Build/Test Cycle:
+Develop/test Teensy low-level first (motors, encoders, IMU, comms).
+Add Pi vision pipeline.
+Integrate comms + closed-loop control.
+Iterative tethered runs in lab → untethered.
+
+
+3. Software Layers / Modules (Incremental)
+
+Low-Level (Teensy):
+Motor control + PID.
+Encoder odometry.
+IMU fusion (e.g., Madgwick or complementary filter).
+Comms parser (receive commands, send telemetry).
+Safety (watchdog, tether limit detection if applicable).
+
+Vision & Perception (Pi + DepthAI):
+Camera pipeline: RGB + depth + neural network (object detection — you mentioned no prior OpenCV/YOLO, so start with DepthAI's built-in models or easy NN blobs).
+Spatial mapping: Convert detections to world coordinates using depth.
+Occupancy grid or simple costmap for obstacles.
+
+Navigation & Planning (Pi):
+Basic behaviors: "go toward exit" while avoiding obstacles.
+Path planning (A*, DWA, or even simple potential fields initially).
+AprilTag detection for docking station (later phase).
+
+High-Level Control:
+State machine on Pi (e.g., Explore, Avoid, Dock, Idle).
+Send velocity commands to Teensy.
+
+
+4. Testing & Iteration Plan
+
+Phase 1 (Tethered): Camera assesses space, plans simple path toward room exit, Teensy executes open-loop or basic closed-loop motion. Stop short of tether limit.
+Phase 2: Add obstacle avoidance using depth data.
+Phase 3: IMU + encoder fusion for better pose estimation.
+Phase 4: AprilTag homing/docking.
+Debugging: Serial logging, visual overlays on Pi (e.g., display detections), telemetry to host PC.
+
+5. Key Considerations
+
+Real-Time vs. Compute: Keep heavy vision/AI on Pi; Teensy stays fast and predictable.
+Power & Heat: Monitor during extended tethered tests.
+Modularity: Abstract interfaces (e.g., MotorController, VisionProcessor, Navigator) so you can swap components easily.
+Libraries: DepthAI for vision, Teensy-specific libs for IMU/encoders, something lightweight for comms/fusion.
