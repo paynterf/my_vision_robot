@@ -1,0 +1,45 @@
+Visual Studio Code vs. Visual Studio + Visual Micro (VS/VM) for Python Coding Discussion Recap
+Yes, we touched on this in the context of your hybrid robot project (Teensy 4.1 low-level C++ + Raspberry Pi 5 Python/DepthAI vision work). Here's the key takeaway from that discussion, tailored to your setup and preferences:
+Your Stated Preferences & Context
+
+You're already very comfortable and invested in Visual Studio + Visual Micro for the Teensy/Arduino side (C++). You want to minimize context-switching and avoid a steep learning curve with new tools where possible.
+For the Python side (RPi5 vision pipeline, DepthAI, potential OpenCV/YOLO exploration, navigation scripts, comms testing, etc.), we discussed options that let you stay productive quickly.
+
+Comparison Summary (VS/VM vs. VS Code for Python)
+Visual Studio + Visual Micro (or plain Visual Studio with Python tools):
+
+Pros for you:
+Single IDE workflow — you can manage both C++ (Teensy) and Python projects in the same familiar environment.
+Strong IntelliSense, debugging, and project management once set up.
+You already have it installed and configured.
+Good for larger, structured solutions (e.g., a combined robot solution with Teensy project + Python scripts).
+
+Cons:
+Python support in VS is solid but can feel heavier than dedicated Python tools.
+Setup for remote Python debugging on the Raspberry Pi 5 (SSH/Remote) is possible but a bit more involved compared to VS Code's Remote - SSH extension.
+Visual Micro is primarily optimized for Arduino/Teensy; Python work would use the standard VS Python workload.
+
+
+Visual Studio Code (VS Code):
+
+Pros:
+Lightweight, fast, and the de facto standard for modern Python development.
+Excellent extensions ecosystem: Python (Microsoft), Jupyter, Remote - SSH (for direct Pi5 development/debugging), Pylance (best-in-class IntelliSense), Git integration, GitHub Copilot (if you use it), and DepthAI-specific helpers.
+Superior remote development experience — you can edit, run, and debug Python code directly on the RPi5 over SSH without much hassle.
+Great for data/science/ML-style work (DepthAI pipelines, image processing, occupancy grids) with notebook support.
+Free, highly customizable, and very popular in the robotics/embedded Python community.
+
+Cons (from your perspective):
+Another tool to learn (keybindings, UI, extensions management), even if the ramp-up is quick for Python.
+Less "one-stop-shop" if you want everything in Visual Studio.
+
+
+Our Recommendation at the Time
+
+For Python on the Pi5 side: Start with VS Code + Remote - SSH. It's the path of least friction for rapid iteration on vision/navigation code. You can keep VS/VM exclusively for the Teensy C++ work.
+Hybrid option: Use Visual Studio for the overall solution (if you want a unified workspace) but lean on VS Code for pure Python scripting and remote Pi work when it feels more natural.
+Practical next steps we discussed:
+Install VS Code (if not already) + Python extension + Remote - SSH.
+Set up SSH key access to your RPi5 for seamless remote editing.
+Create a Python virtual environment on the Pi for DepthAI dependencies.
+Test a simple script (e.g., basic OAK-D Lite color/depth preview) from VS Code.
