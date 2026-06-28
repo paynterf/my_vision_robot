@@ -1,0 +1,46 @@
+Current Project State: OAK-D Lite Integration on Raspberry Pi 5Goal
+Successfully integrate the Luxonis OAK-D Lite camera with a Raspberry Pi 5 running Ubuntu 24.04 and establish a clean, reproducible Python development environment for future vision-based robot work.Hardware & OS  Raspberry Pi 5  
+Ubuntu 24.04 Desktop  
+OAK-D Lite connected via USB 3  
+Physical monitor attached to the Pi (required for GUI applications)
+
+Virtual Environment (depthai-venv)
+A dedicated virtual environment was created specifically for this project:bash
+
+python3 -m venv ~/depthai-venv
+source ~/depthai-venv/bin/activate
+
+Key packages installed inside the venv:depthai (version 3.6.1 at time of successful test)
+opencv-python
+Supporting libraries (numpy, etc.)
+
+The environment is activated with:bash
+
+source ~/depthai-venv/bin/activate
+
+A requirements.txt file was generated from this environment for reproducibility.Important Runtime Requirements
+Because the OAK-D Lite examples use OpenCV GUI windows, the following must be set when running code that displays images:bash
+
+export DISPLAY=:0
+xhost +local:          # Usually only needs to be run once per login session
+
+Project Structure (Current State)~/depthai-venv — Main virtual environment
+~/depthai-python/examples — Official Luxonis example scripts (including ColorCamera/rgb_preview.py)
+~/oak-d-lite-ratchet-20260607/ — Clean snapshot containing:README_SUCCESS.md (full activation and usage instructions)
+requirements.txt
+Backup of the working state (depthai-clean-baseline.tar.gz)
+
+Successful Verification
+The integration was confirmed working by successfully running:bash
+
+cd ~/depthai-python/examples
+export DISPLAY=:0
+python ColorCamera/rgb_preview.py
+
+This displays a live RGB video stream from the OAK-D Lite camera in a window on the attached monitor.How to Resume Work
+To return to the working state:Activate the virtual environment
+Set the display variable
+Work from the ~/depthai-python/examples folder (or create new scripts there)
+
+All future Python development for this robot project should be done inside the depthai-venv virtual environment.
+
