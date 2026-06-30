@@ -1,92 +1,142 @@
 #!/usr/bin/env python3
 """
-Wifi_OTA_Demo.py - Final version for ongoing vision-enhanced robot project
-Last updated: 2026-06-24
+Wifi_OTA.py - Automatic OTA uploader for Teensy 4.1
+Watches for latest.hex and triggers OTA via Serial1
+Last updated: 2026-06-29
 """
 
 import serial
 import time
-import sys
 import os
+import sys
 from datetime import datetime
+import signal
+
+# Configuration
+HEX_FILE_PATH = "/home/pi/my_vision_robot/latest.hex"
+POLL_INTERVAL = 1.0          # seconds
+MIN_HEX_SIZE = 50000         # bytes
+MAX_AGE_SECONDS = 300        # 5 minutes
+
+def log(msg):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {msg}")
+
+def is_fresh_hex_file(path):
+    if not os.path.exists(path):
+        return False
+    try:
+        size = os.path.getsize(path)
+        if size < MIN_HEX_SIZE:
+            log(f"File too small ({size} bytes)")
+            return False
+        
+        mtime = os.path.getmtime(path)
+        age = time.time() - mtime
+        if age > MAX_AGE_SECONDS:
+            #log(f"File too old ({age:.0f}s)")
+            return False
+        
+        return True
+    except Exception as e:
+        log(f"Error checking file: {e}")
+        return False
 
 def ota_upload(hex_file_path):
     if not os.path.exists(hex_file_path):
-        print(f"Error: Hex file not found: {hex_file_path}")
+        log(f"Error: Hex file not found: {hex_file_path}")
         return False
 
-    print(f"\n=== OTA Upload Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    print(f"File: {hex_file_path}\n")
+    log(f"\n=== OTA Upload Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    log(f"File: {hex_file_path}\n")
 
     ser = serial.Serial(port='/dev/ttyAMA0', baudrate=115200, timeout=3)
 
     try:
-        print("Sending 'U' trigger...")
+        log("Sending 'U' trigger...")
         ser.write(b'U')
         time.sleep(1.0)
 
-        print("Waiting for Teensy prompt...")
+        log("Waiting for Teensy prompt...")
         start = time.time()
         while time.time() - start < 10:
             if ser.in_waiting:
                 line = ser.readline().decode('utf-8', errors='replace').strip()
-                print(f"Teensy: {line}")
+                log(f"Teensy: {line}")
                 if "reading hex lines" in line.lower():
-                    print("✓ Got prompt")
+                    log("✓ Got prompt")
                     break
             time.sleep(0.2)
         else:
-            print("✗ Timed out waiting for prompt")
+            log("✗ Timed out waiting for prompt")
             return False
 
         # Send file
-        print("Sending .hex file...")
+        log("Sending .hex file...")
         line_count = 0
         with open(hex_file_path, 'r') as f:
             for line_count, line in enumerate(f, 1):
                 ser.write(line.encode('utf-8'))
-                if line_count % 200 == 0:      # Fixed: was line_num
+                if line_count % 200 == 0:
                     time.sleep(0.005)
 
-        print(f"Sent {line_count} lines. Sending EOF...")
+        log(f"Sent {line_count} lines. Sending EOF...")
         ser.write(b':00000001FF\r\n')
         ser.flush()
         time.sleep(1.0)
 
         # Line count confirmation
-        print("Waiting for line count prompt...")
+        log("Waiting for line count prompt...")
         start = time.time()
         while time.time() - start < 15:
             if ser.in_waiting:
                 line = ser.readline().decode('utf-8', errors='replace').strip()
-                print(f"Teensy: {line}")
+                log(f"Teensy: {line}")
                 if "enter" in line.lower() and "flash" in line.lower():
                     parts = line.split()
                     if len(parts) > 1 and parts[1].isdigit():
                         num = parts[1]
-                        print(f"Sending line count: {num}")
+                        log(f"Sending line count: {num}")
                         ser.write((num + '\r\n').encode('utf-8'))
                         ser.flush()
                         break
             time.sleep(0.3)
 
-        print("\n✅ OTA UPDATE SUCCESSFUL!")
-        print("   Flash process started.")
-        print("   Waiting for Teensy reboot and Serial1 re-initialization...\n")
+        log("\n✅ OTA UPDATE SUCCESSFUL!")
+        log("   Flash process started.")
+        log("   Waiting for Teensy reboot...\n")
         
-        time.sleep(12)                    # Important for reliable reboot
-        print("Upload process finished. You can now check Serial1 output.\n")
+        time.sleep(12)
+        log("Upload process finished.\n")
         return True
 
     except Exception as e:
-        print(f"Error during OTA: {e}")
+        log(f"Error during OTA: {e}")
         return False
     finally:
         ser.close()
 
+def main():
+    log("Wifi_OTA watcher started (low priority)")
+    last_mtime = 0.0
+
+    if os.path.exists(HEX_FILE_PATH):
+        last_mtime = os.path.getmtime(HEX_FILE_PATH)
+        log(f"Initial latest.hex found (size: {os.path.getsize(HEX_FILE_PATH)} bytes)")
+
+    while True:
+        try:
+            if is_fresh_hex_file(HEX_FILE_PATH):
+                current_mtime = os.path.getmtime(HEX_FILE_PATH)
+                if current_mtime > last_mtime + 0.5:   # small tolerance
+                    log("=== New latest.hex detected! Starting OTA ===")
+                    last_mtime = current_mtime
+                    ota_upload(HEX_FILE_PATH)
+        except Exception as e:
+            log(f"Watcher error: {e}")
+
+        time.sleep(POLL_INTERVAL)
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 Wifi_OTA_Demo.py <full_path_to_.hex>")
-        sys.exit(1)
-    
-    ota_upload(sys.argv[1])
+    signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
+    main()
