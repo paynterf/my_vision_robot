@@ -1,0 +1,14 @@
+[Unit]
+Description=Wifi OTA Firmware Watcher for Teensy
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/my_vision_robot
+ExecStart=/usr/bin/python3 /home/pi/my_vision_robot/software/Wifi_OTA/pi5/Wifi_OTA.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
