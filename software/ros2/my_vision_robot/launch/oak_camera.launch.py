@@ -5,7 +5,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    package_name = 'myrobot'
+    package_name = 'my_vision_robot'
 
     # Path to our YAML config (installed by colcon)
     config_file = PathJoinSubstitution([
