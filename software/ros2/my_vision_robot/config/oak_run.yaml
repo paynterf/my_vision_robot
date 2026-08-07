@@ -1,0 +1,28 @@
+camera:
+  ros__parameters:
+    camera:
+      i_pipeline_type: 'Depth'
+      i_tf_camera_model: 'OAK-D-LITE'
+      i_tf_camera_name: 'oak'
+      i_tf_parent_frame: 'oak-d-base-frame'
+      i_tf_camera_frame: 'oak_camera_link'
+      i_enable_ir: true
+      i_nn_type: none
+    pipeline_gen:
+      i_enable_imu: false
+    left:
+      i_resolution: 480P          # Slightly higher than 400P
+    right:
+      i_resolution: 480P
+    stereo:
+      i_width: 640
+      i_height: 480
+      i_subpixel: true            # ← Important: enables subpixel accuracy
+      i_lr_check: true
+      i_publish_topic: true
+      i_align_depth: true
+      i_output_disparity: false
+      i_output_depth: true
+      i_depth_preset: DEFAULT     # ← Changed from HIGH_ACCURACY
+    rgb:
+      i_disable_node: false

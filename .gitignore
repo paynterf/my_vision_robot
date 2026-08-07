@@ -66,3 +66,39 @@ Thumbs.db
 *.pdf
 *.docx
 *.xlsx
+
+# =============================================
+# ROS 2 Specific
+# =============================================
+build/
+install/
+log/
+*.bag
+*.db3
+
+# Colcon / Ament build artifacts
+colcon_*
+ament_cmake_*
+
+# ROS 2 Python package build files
+*.egg-info/
+dist/
+
+# =============================================
+# Additional Useful Ignores
+# =============================================
+
+# ROS 2 workspace (keep source only)
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Data files generated during testing
+*.csv
+*.png          # Comment this out if you want to commit example images
+depth_*.csv
+depth_*.png
+
+# Temporary backup folders
+backup_*/
+backup_scripts_*/
