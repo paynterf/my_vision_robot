@@ -21,9 +21,21 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="VisionEnhanced4WheelRobot.ino" />
+    <ClCompile Include="..\..\..\Teensy_OTA_Base\FlasherX\FlashTxx.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\Teensy_OTA_Base\FlasherX\FXUtil.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="__vm\.VisionEnhanced4WheelRobot.vsarduino.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\Teensy_OTA_Base\FlasherX\FlashTxx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\Teensy_OTA_Base\FlasherX\FXUtil.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

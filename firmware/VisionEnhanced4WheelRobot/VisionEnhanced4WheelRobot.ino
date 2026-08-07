@@ -4,6 +4,14 @@
 //08/04/26 copied MPU6050 DMP6 stuff from WallE3_Git
 #include <Wire.h>
 //#include "FlashTxx.h"		// TLC/T3x/T4x flash primitives
+
+extern "C"
+{
+#include "FlashTxx.h"
+}
+
+#include "FXUtil.h"
+
 #include <elapsedMillis.h>
 #include "MPU6050_6Axis_MotionApps612.h"  //01/18/22 changed to use the \I2CDevLib\Arduino\MPU6050\ version
 #include "I2C_Anything.h" //needed for sending float data over I2C
@@ -43,6 +51,8 @@
 
 //#pragma region PRE_SETUP
 MPU6050 mpu(MPU6050_I2C_ADDR);
+uint32_t buffer_addr, buffer_size;
+
 
 
 #pragma region TIME INTERVALS
@@ -2822,36 +2832,37 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
     case 0x55: //ASCII 'U'
     case 0x75: //ASCII 'u'
 #pragma region FIRMWARE_UPDATE_MAIN
-      //      StopBothMotors();
-      //      gl_pSerPort->printf(F("Start Program Update - Send new HEX file!"));
-      //
-      //      //09/20/21 copied from FlasherX - loop()
-      //      if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
-      //      {
-      //        gl_pSerPort->printf("unable to create buffer\n"); Serial.flush();
-      //
-      //        for (;;) {}
-      //      }
-      //
-      //      gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
-      //        buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
-      //        buffer_addr, buffer_addr + buffer_size);
-      //
-      //      //09/20/21 clear the serial buffer
-      //      while (gl_pSerPort->available())
-      //      {
-      //        gl_pSerPort->read();
-      //      }
-      //
-      //      // receive hex file via serial, write new firmware to flash, clean up, reboot
-      //      update_firmware(&Serial1, buffer_addr, buffer_size); // no return if success
-      //
-      //      // return from update_firmware() means error or user abort, so clean up and
-      //      // reboot to ensure that static vars get boot-up initialized before retry
-      //      gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
-      //      firmware_buffer_free(buffer_addr, buffer_size);
-      //      Serial1.flush();
-      //      REBOOT;
+            StopBothMotors();
+            gl_pSerPort->printf(F("Start Program Update - Send new HEX file!"));
+      
+            //09/20/21 copied from FlasherX - loop()
+            if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
+            {
+              gl_pSerPort->printf("unable to create buffer\n"); Serial.flush();
+      
+              for (;;) {}
+            }
+      
+            gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
+              buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
+              buffer_addr, buffer_addr + buffer_size);
+      
+            //09/20/21 clear the serial buffer
+            while (gl_pSerPort->available())
+            {
+              gl_pSerPort->read();
+            }
+      
+            // receive hex file via serial, write new firmware to flash, clean up, reboot
+            //update_firmware(&Serial1, buffer_addr, buffer_size); // no return if success
+            update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size); // no return if success
+      
+            // return from update_firmware() means error or user abort, so clean up and
+            // reboot to ensure that static vars get boot-up initialized before retry
+            gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
+            firmware_buffer_free(buffer_addr, buffer_size);
+            Serial1.flush();
+            REBOOT;
 #pragma endregion FIRMWARE_UPDATE_MAIN //doesn't return
       break;
     case 0x43: //ASCII 'C'
@@ -3020,36 +3031,38 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
           case 0x55: //ASCII 'U'
           case 0x75: //ASCII 'u'
 #pragma region FIRMWARE UPDATE
-            //StopBothMotors();
-            //gl_pSerPort->printf(F("Start Program Update - Send new HEX file!\n"));
+            StopBothMotors();
+            gl_pSerPort->printf(F("Start Program Update - Send new HEX file!\n"));
 
-            ////09/20/21 copied from FlasherX - loop()
-            //if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
-            //{
-            //  gl_pSerPort->printf("unable to create buffer\n"); Serial.flush();
+            //09/20/21 copied from FlasherX - loop()
+            if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
+            {
+              gl_pSerPort->printf("unable to create buffer\n"); Serial.flush();
 
-            //  for (;;) {}
-            //}
+              for (;;) {}
+            }
 
-            //gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
-            //  buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
-            //  buffer_addr, buffer_addr + buffer_size);
+            gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
+              buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
+              buffer_addr, buffer_addr + buffer_size);
 
-            ////09/20/21 clear the serial buffer
-            //while (gl_pSerPort->available())
-            //{
-            //  gl_pSerPort->read();
-            //}
+            //09/20/21 clear the serial buffer
+            while (gl_pSerPort->available())
+            {
+              gl_pSerPort->read();
+            }
 
-            //// receive hex file via serial, write new firmware to flash, clean up, reboot
+            // receive hex file via serial, write new firmware to flash, clean up, reboot
             //update_firmware(&Serial1, buffer_addr, buffer_size); // no return if success
+            update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size); // no return if success
 
-            //// return from update_firmware() means error or user abort, so clean up and
-            //// reboot to ensure that static vars get boot-up initialized before retry
-            //gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
-            //firmware_buffer_free(buffer_addr, buffer_size);
-            //Serial1.flush();
-            //REBOOT;
+
+            // return from update_firmware() means error or user abort, so clean up and
+            // reboot to ensure that static vars get boot-up initialized before retry
+            gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
+            firmware_buffer_free(buffer_addr, buffer_size);
+            Serial1.flush();
+            REBOOT;
 #pragma endregion FIRMWARE UPDATE  //doesn't return
             break;
           case 0x2A: //ASCII '*' //11/04/23 added to force FALSE return
