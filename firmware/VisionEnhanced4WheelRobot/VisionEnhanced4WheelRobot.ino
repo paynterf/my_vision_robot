@@ -800,8 +800,8 @@ void RunBothMotorsMsec(bool bisFwd, int timeMsec, uint16_t leftspeednum, uint16_
 void SetLeftMotorDirAndSpeed(bool bIsFwd, uint16_t speed)
 {
   //DEBUG!!
-  gl_pSerPort->printf("In SetLeftMotorDirAndSpeed(%s, %d)\n",
-    (bIsFwd == true) ? "true" : "false", speed);
+  //gl_pSerPort->printf("In SetLeftMotorDirAndSpeed(%s, %d)\n",
+  //  (bIsFwd == true) ? "true" : "false", speed);
   //DEBUG!!
 
     //11/04/21 fwd for right motors is CCW when looking at shaft
@@ -837,8 +837,8 @@ void SetLeftMotorDirAndSpeed(bool bIsFwd, uint16_t speed)
 void SetRightMotorDirAndSpeed(bool bIsFwd, uint16_t speed)
 {
   //DEBUG!!
-  gl_pSerPort->printf("In SetRightMotorDirAndSpeed(%s, %d)\n",
-    (bIsFwd == true) ? "true" : "false", speed);
+  //gl_pSerPort->printf("In SetRightMotorDirAndSpeed(%s, %d)\n",
+  //  (bIsFwd == true) ? "true" : "false", speed);
   //DEBUG!!
 
     //11/04/21 fwd for right motors is CW when looking at shaft
@@ -2768,38 +2768,52 @@ bool CheckForUserInput()
   //  09/27/22 back to void type - 'Aa' now soft-reboots the processor
   //  09/27/22 now this function just grabs character & calls CheckForUserInput(char in_char)
   //  11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
+  //  08/07/26 rev to check for input on any serial port
 
   //DEBUG!!
   //gl_pSerPort->printf("%lu: In CheckForUserInput() with gl_pSerPort->available() = %s\n",
   //  (uint32_t)gl_ElapsedRunMillisec, gl_pSerPort->available() > 0?"TRUE":"FALSE");
 
-  //Serial.printf("at top of CheckForUserInput;\n");
-  //while (1);
   const int bufflen = 3;
   char buff[bufflen];
   memset(buff, 0, bufflen);
   byte incomingByte = 0; //moved here 11/21/21
-  //int numchars = 0;
+
   bool retval = true; //11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
 
+
+  //  08/07/26 rev to check for input on any serial port
   //if (gl_pSerPort->available() > 0)
-  if (Serial.available() > 0)
+  if(Serial.available() > 0)
   {
     // read the incoming byte://05/08/23 this relies on having 'Both CR & LF' 
     // enabled at the bottom of the serial port window
-    gl_pSerPort->readBytesUntil('\n', buff, sizeof(buff));
+    //gl_pSerPort->readBytesUntil('\n', buff, sizeof(buff));
+    Serial.readBytesUntil('\n', buff, sizeof(buff));
     incomingByte = buff[0];
-    //gl_pSerPort->printf("%lu: In CheckForUserInput() with byte = %c\n",(uint32_t)gl_ElapsedRunMillisec, incomingByte);
 
     // say what you got:
-    //gl_pSerPort->printf("I received %d chars, first char 0X%X\n", numchars, incomingByte)
+    Serial.printf("in CheckForUserInput got %c from Serial\n", incomingByte);
+
+    //09/27/22 now just call CheckForUserInput(incomingByte)
+    retval = CheckForUserInput(incomingByte);
+  }
+  else if (Serial1.available() > 0)
+  {
+    // read the incoming byte://05/08/23 this relies on having 'Both CR & LF' 
+    // enabled at the bottom of the serial port window
+    //gl_pSerPort->readBytesUntil('\n', buff, sizeof(buff));
+    Serial1.readBytesUntil('\n', buff, sizeof(buff));
+    incomingByte = buff[0];
+
+    // say what you got:
+    //08/07/26 rev to output debug info on Serial (USB port)
     Serial.printf("in CheckForUserInput just before call to CheckForUserInput(incomingByte)\n");
 
     //09/27/22 now just call CheckForUserInput(incomingByte)
     retval = CheckForUserInput(incomingByte);
   }
-  //Serial.printf("at bottom of CheckForUserInput;\n");
-  //while (1);
+
   return retval;//11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary 
 }
 
@@ -2807,7 +2821,6 @@ bool CheckForUserInput()
 //void CheckForUserInput(char in_char)
 bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
 {
-  gl_pSerPort->printf("%lu: At top of CheckForUserInput(0X%X)\n", (uint32_t)gl_ElapsedRunMillisec, in_char);
   //Purpose: Check for user override
   //Inputs: in_char = char object representing user override input
   //Outputs: override actions taken.  Returns if 'auto' mode selected
@@ -2920,6 +2933,7 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
           // say what you got:
           gl_pSerPort->printf("I received %s\n", buff);
 
+          //clear out any remaining chars
           while (gl_pSerPort->available())
           {
             gl_pSerPort->read();
@@ -2927,6 +2941,24 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
             //gl_pSerPort->printf("%lu: I removed 0X%X from Serial1\n", (uint32_t)gl_ElapsedRunMillisec, incomingByte);
           }
         }
+
+        //08/07/26 added to allow Pi5 to inject characters
+        else if (Serial1.available() > 0)
+        {
+          // read the incoming bytes:
+          Serial1.readBytesUntil('\n', buff, sizeof(buff));
+          incomingByte = buff[0];
+
+          // say what you got:
+          Serial.printf("I received %s on Serial1\n", buff);
+
+          //clear out any remaining chars
+          while (Serial1.available())
+          {
+            Serial1.read();
+          }
+        }
+
 
         //11/21/21 incomingByte can come from either serial input
         if (incomingByte != 0)
@@ -3285,10 +3317,10 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
     tgt_deg -= 360;
   }
 
-  //DEBUG!!
-  gl_pSerPort->printf("SpinTurn: Init hdg = %4.2f deg, Turn = %4.2f  deg, tgt = %4.2f deg, timeout = %4.2f sec\n\n",
-    IMUHdgValDeg, numDeg, tgt_deg, timeout_sec);
-  //DEBUG!!
+//DEBUG!!
+  //gl_pSerPort->printf("SpinTurn: Init hdg = %4.2f deg, Turn = %4.2f  deg, tgt = %4.2f deg, timeout = %4.2f sec\n\n",
+  //  IMUHdgValDeg, numDeg, tgt_deg, timeout_sec);
+//DEBUG!!
 
   float curHdgMatchVal = 0;
 
@@ -3345,7 +3377,7 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
       //if (rate > 3 * degPersec)
       //{
       //	//DEBUG!!
-      Serial.printf("hdg/prevhdg/dHdg/rate = %2.2f\t%2.2f\t%2.2f\t%2.2f, excessive rate - replacing with %2.2f\n", IMUHdgValDeg, Prev_HdgDeg, dHdg, rate, degPersec);
+      //Serial.printf("hdg/prevhdg/dHdg/rate = %2.2f\t%2.2f\t%2.2f\t%2.2f, excessive rate - replacing with %2.2f\n", IMUHdgValDeg, Prev_HdgDeg, dHdg, rate, degPersec);
       //	//DEBUG!!
       //	rate = degPersec;
       //}
@@ -3396,11 +3428,11 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
       bDoneTurning = (curHdgMatchVal >= HDG_FULL_MATCH_VAL
         || (prevHdgMatchVal >= HDG_MIN_MATCH_VAL && matchSlope <= -0.01)); //have to use < vs <= as slope == 0 at start
 
-      Serial.printf("curHdgMatchVal = %2.2f, prevHdgMatchVal = %2.2f, matchslope = %2.2f, bDoneTurning = %d\n",
-        curHdgMatchVal,
-        prevHdgMatchVal,
-        matchSlope,
-        bDoneTurning);
+      //Serial.printf("curHdgMatchVal = %2.2f, prevHdgMatchVal = %2.2f, matchslope = %2.2f, bDoneTurning = %d\n",
+      //  curHdgMatchVal,
+      //  prevHdgMatchVal,
+      //  matchSlope,
+      //  bDoneTurning);
 
       prevHdgMatchVal = curHdgMatchVal; //07/31/21 moved below bDoneTurning chk so can use prevHdgMatchVal vs curHdgMatchVal in slope check
 
