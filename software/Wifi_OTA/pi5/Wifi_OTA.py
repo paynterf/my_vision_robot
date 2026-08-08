@@ -2,7 +2,9 @@
 """
 Wifi_OTA.py - Automatic OTA uploader for Teensy 4.1
 Watches for latest.hex and triggers OTA via Serial1
-Last updated: 2026-06-29
+
+Standardized path (Aug 2026):
+  /home/pi/my_vision_robot/firmware/latest.hex
 """
 
 import serial
@@ -13,14 +15,18 @@ from datetime import datetime
 import signal
 
 # Configuration
-HEX_FILE_PATH = "/home/pi/my_vision_robot/latest.hex"
+HEX_FILE_PATH = "/home/pi/my_vision_robot/firmware/latest.hex"
 POLL_INTERVAL = 1.0          # seconds
 MIN_HEX_SIZE = 50000         # bytes
 MAX_AGE_SECONDS = 300        # 5 minutes
+SERIAL_PORT = "/dev/ttyAMA0"
+BAUD = 115200
+
 
 def log(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {msg}")
+
 
 def is_fresh_hex_file(path):
     if not os.path.exists(path):
@@ -30,17 +36,17 @@ def is_fresh_hex_file(path):
         if size < MIN_HEX_SIZE:
             log(f"File too small ({size} bytes)")
             return False
-        
+
         mtime = os.path.getmtime(path)
         age = time.time() - mtime
         if age > MAX_AGE_SECONDS:
-            #log(f"File too old ({age:.0f}s)")
             return False
-        
+
         return True
     except Exception as e:
         log(f"Error checking file: {e}")
         return False
+
 
 def ota_upload(hex_file_path):
     if not os.path.exists(hex_file_path):
@@ -50,7 +56,13 @@ def ota_upload(hex_file_path):
     log(f"\n=== OTA Upload Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
     log(f"File: {hex_file_path}\n")
 
-    ser = serial.Serial(port='/dev/ttyAMA0', baudrate=115200, timeout=3)
+    try:
+        ser = serial.Serial(port=SERIAL_PORT, baudrate=BAUD, timeout=3)
+    except serial.SerialException as e:
+        log(f"Cannot open {SERIAL_PORT}: {e}")
+        log("Is clearest_direction_node (or another process) holding the port?")
+        log("Stop the vision node first, then the watcher will retry on the next cycle.")
+        return False
 
     try:
         log("Sending 'U' trigger...")
@@ -105,7 +117,7 @@ def ota_upload(hex_file_path):
         log("\n✅ OTA UPDATE SUCCESSFUL!")
         log("   Flash process started.")
         log("   Waiting for Teensy reboot...\n")
-        
+
         time.sleep(12)
         log("Upload process finished.\n")
         return True
@@ -116,8 +128,10 @@ def ota_upload(hex_file_path):
     finally:
         ser.close()
 
+
 def main():
-    log("Wifi_OTA watcher started (low priority)")
+    log("Wifi_OTA watcher started")
+    log(f"Watching: {HEX_FILE_PATH}")
     last_mtime = 0.0
 
     if os.path.exists(HEX_FILE_PATH):
@@ -136,6 +150,7 @@ def main():
             log(f"Watcher error: {e}")
 
         time.sleep(POLL_INTERVAL)
+
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
