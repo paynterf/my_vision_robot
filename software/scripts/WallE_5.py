@@ -35,6 +35,9 @@ OTA_POLL_INTERVAL = 1.0          # seconds
 MIN_HEX_SIZE    = 50000          # bytes
 MAX_AGE_SECONDS = 300            # 5 minutes
 
+# Telemetry log file (for the second terminal)
+TELEMETRY_LOG = Path.home() / "my_vision_robot/logs/telemetry.log"
+
 # ----------------------------------------------------------------------
 # Globals
 # ----------------------------------------------------------------------
@@ -96,17 +99,27 @@ def send_turn(direction: str, degrees: float, rate: float = None):
 # Telemetry relay
 # ----------------------------------------------------------------------
 def telemetry_loop():
+    """Read lines from the Teensy and write them cleanly to the telemetry log."""
     global telemetry_running
-    while True:
-        if telemetry_running and ser and ser.is_open and ser.in_waiting:
-            try:
-                line = ser.readline().decode(errors="ignore").strip()
-                if line:
-                    print(f"[Teensy] {line}")
-            except Exception as e:
-                print(f"[telemetry] {e}")
-        time.sleep(0.02)
 
+    # Make sure the logs directory exists
+    TELEMETRY_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(TELEMETRY_LOG, "a", buffering=1) as logf:   # line-buffered
+        while True:
+            if telemetry_running and ser and ser.is_open and ser.in_waiting:
+                try:
+                    line = ser.readline().decode(errors="ignore").rstrip()
+                    if line:
+                        # Write the pure original line to the log file
+                        logf.write(line + "\n")
+
+                        # Optional: still show a short version in the main WallE_5 terminal
+                        # (comment this out if you want zero telemetry in the command window)
+                        # print(f"[Teensy] {line[:90]}")
+                except Exception as e:
+                    print(f"[telemetry] {e}")
+            time.sleep(0.02)
 # ----------------------------------------------------------------------
 # Camera
 # ----------------------------------------------------------------------
@@ -285,6 +298,9 @@ def main():
     print("\n========================================")
     print("       WallE_5 Supervisor Starting")
     print("========================================\n")
+
+    print(f"Telemetry log: {TELEMETRY_LOG}")
+    print("In a second terminal run:  tail -f ~/my_vision_robot/logs/telemetry.log\n")
 
     # 1. Serial
     if not open_serial():
