@@ -2829,7 +2829,9 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
   //  09/28/22 'Aa' now causes a processor reboot
   //  11/04/23 '*' now causes fcn to return FALSE
 
-  const int bufflen = 3;
+  //08/09/26 bumped bufflen to accomodate new 'Lnn.nn' and 'Rnn.nn' SpinTurn() commands
+  //const int bufflen = 3;
+  const int bufflen = 10;
   char buff[bufflen];
   memset(buff, 0, bufflen);
   byte incomingByte = 0; //moved here 11/21/21
@@ -2927,7 +2929,7 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
         if (gl_pSerPort->available() > 0)
         {
           // read the incoming bytes:
-          gl_pSerPort->readBytesUntil('\n', buff, sizeof(buff));
+          gl_pSerPort->readBytesUntil('\n', buff, sizeof(buff)); //08/10/26 this fills 'buff' with entire 'L/Rnn.nn' string
           incomingByte = buff[0];
 
           // say what you got:
@@ -2946,7 +2948,7 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
         else if (Serial1.available() > 0)
         {
           // read the incoming bytes:
-          Serial1.readBytesUntil('\n', buff, sizeof(buff));
+          Serial1.readBytesUntil('\n', buff, sizeof(buff));//08/10/26 this fills 'buff' with entire 'L/Rnn.nn' string
           incomingByte = buff[0];
 
           // say what you got:
@@ -2966,6 +2968,47 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
           //gl_pSerPort->printf("%lu: Top of Switch Statement\n", (uint32_t)gl_ElapsedRunMillisec);
           switch (incomingByte)
           {
+            //08/09/26 added 'L' & 'R' commands for arbitrary SpinTurn amounts
+            //08/10/26 at this point 'buff' holds entire 'L/Rnn.nn' string
+          case 'L':   // or case 0x4C
+          case 'R':
+          {
+            gl_pSerPort->printf(F("In R/L Case with incomingByte = %c\n"), incomingByte);
+
+            // If you are switching on a variable named `incomingByte`then
+            bool b_ccw = (incomingByte == 'L');
+
+            char numBuf[16] = {}; //this will hold 'L/R' string minus the 'L' or 'R'
+            //strncpy(numBuf, &buff[1], strlen(buff) - 1);
+            strncpy(numBuf, &buff[1], 5);
+            numBuf[5] = '\n';
+
+            gl_pSerPort->printf(F("In R/L Case with b_ccw = %s numBuf = %s\n"), b_ccw? "CW":"CCW", numBuf);
+
+            float degrees = 0.0f;
+            float rate = DEFAULT_TURN_RATE_DEGPERSEC;   //default is 30 deg/s 
+
+            // Parse "30.55" or "30.55,45"
+            int parsed = sscanf(numBuf, "%f,%f", &degrees, &rate);
+
+            if (parsed >= 1 && degrees > 0.05f && degrees <= 360.0f)
+            {
+              gl_pSerPort->printf(F("%s %.2f deg @ %.1f deg/s\n"),
+                b_ccw ? "CCW" : "CW", degrees, rate);
+
+              SpinTurn(b_ccw, degrees, rate);
+
+              if (gl_bIsForwardDir)
+                MoveAhead(speed, speed);
+              else
+                MoveReverse(speed, speed);
+            }
+            else
+            {
+              gl_pSerPort->printf(F("Bad turn argument: '%s'\n"), buff);
+            }
+          }
+          break;
           case 0x30: //Dec '0'
             gl_pSerPort->printf(F("CCW 180 deg Turn\n"));
             SpinTurn(true, 180, 90);
