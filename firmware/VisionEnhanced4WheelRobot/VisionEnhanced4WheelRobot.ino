@@ -1,9 +1,9 @@
-//#include "MPU6050.h"
+﻿//#include "MPU6050.h"
 //MPU6050 mpu;
 
 //08/04/26 copied MPU6050 DMP6 stuff from WallE3_Git
+#include <VL53L1X.h>
 #include <Wire.h>
-//#include "FlashTxx.h"		// TLC/T3x/T4x flash primitives
 
 extern "C"
 {
@@ -17,6 +17,8 @@ extern "C"
 #include "I2C_Anything.h" //needed for sending float data over I2C
 #include "timelib.h" //added 01/01/22 for charge monitoring support
 #include <math.h>
+#include "TeePrint.h"//added 08/16/26 for multiple logging targets
+
 //#include "enums.h" //'local' header file for navigation 'state' enums
 
 #pragma region DEFINES
@@ -46,13 +48,14 @@ extern "C"
 #define VL53L0X_I2C_SLAVE_ADDRESS 0x20 //Teensy 3.5 VL53L0X ToF LIDAR controller - chg to #define 02/01/23
 //uint8_t IR_HOMING_MODULE_SLAVE_ADDR = 8;  //uint8_t type reqd here for Wire.requestFrom() call
 #define IR_HOMING_MODULE_SLAVE_ADDR 8  //uint8_t type reqd here for Wire.requestFrom() call - chg to #define 02/01/23
-#define GARMIN_LIDAR_I2C_ADDR 0x62  //added 02/25/23 for Garmin LIDAR-Lite V4/LED on main Teensy Wire2
+//#define GARMIN_LIDAR_I2C_ADDR 0x62  //added 02/25/23 for Garmin LIDAR-Lite V4/LED on main Teensy Wire2
 #pragma endregion I2C_ADDRESSES
 
 //#pragma region PRE_SETUP
 MPU6050 mpu(MPU6050_I2C_ADDR);
 uint32_t buffer_addr, buffer_size;
-
+VL53L1X lidar_Rear;
+TeePrint tee(Serial, Serial1);
 
 
 #pragma region TIME INTERVALS
@@ -83,6 +86,7 @@ const float VOLTAGE_TO_CURRENT_RATIO = 1.f; //Used for both 'Total' and 'Run' se
 #pragma endregion ADC CONSTANTS
 
 #pragma region TELEMETRYSTRINGS
+const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tHdg";
 const char* IRHomingTelemStr = "Time\tBattV\tFin1\tFin2\tSteer\tPID_Out\t\tLSpd\tRSpd\tFrontD\tRearD";
 const char* IRHomingTelemStrNoPings = "Time\tBattV\tFin1\tFin2\tSteer\tPID_Out\t\tLSpd\tRSpd\n";
 
@@ -133,21 +137,17 @@ const uint16_t InA_Left = 22;
 const uint16_t InB_Left = 21;
 const uint16_t Spd_Left = 23;
 
-//08/05/26 pin 35 isn't PWMable on Teensy 4.1, but pin 33 is
-//const uint16_t InA_Right = 34;
-//const uint16_t InB_Right = 33;
-//const uint16_t Spd_Right = 35;
 const uint16_t InA_Right = 34;
-const uint16_t InB_Right = 35;
-const uint16_t Spd_Right = 33;
+const uint16_t InB_Right = 33;
+const uint16_t Spd_Right = 35;
 #pragma endregion MOTOR PINS
 
 #pragma region CHG SUPP PINS
 //12/19/21 updated here, schematic, and spreadsheet
 const uint16_t CHG_CONNECT_PIN = A0; //output of photo resistor looking at TP5100 CHG LED
-const uint16_t BATT_MON_PIN = A1; //connected to 5VLDO regulator module
-const uint16_t TOT_CURR_PIN = A2; //connected to 1NA619 between charge plug and battery
-const uint16_t RUN_CURR_PIN = A3; //connected to 1NA619 between battery and rest of robot
+//const uint16_t BATT_MON_PIN = A1; //connected to 5VLDO regulator module
+//const uint16_t TOT_CURR_PIN = A2; //connected to 1NA619 between charge plug and battery
+//const uint16_t RUN_CURR_PIN = A3; //connected to 1NA619 between battery and rest of robot
 
 //state-of-charge indicator LEDs
 const uint16_t CHG_FIN_LED_PIN = 32; //purple
@@ -158,9 +158,20 @@ const uint16_t _20PCT_LED_PIN = 28; //red
 const uint16_t CHG_CONNECT_LED_PIN = 27;//brown
 #pragma endregion CHG SUPP PINS
 
+#pragma region SENSOR PIN ASSIGNMENTS //ported from VL53L1X_Demo.ino
+const uint8_t XSHUT_PIN = 26;
+const uint8_t SW_BATT_VOLT_PIN = 15;
+const uint8_t I_TOP_PIN = 39;
+const uint8_t I_BOT_PIN = 17;
+const uint8_t I_CHG_PIN = 16;
+const uint8_t LASER_PIN = 5;
+#pragma endregion SENSOR PIN ASSIGNMENTS
+
+
 #pragma region MISCELLANEOUS_PINS
 //Second Deck Pins
 const uint16_t RED_LASER_DIODE_PIN = 5;//Laser pointer
+const uint8_t SPEAKER_PIN = 2;
 
 //02/23/23 replace Pulsed Light LIDAR with Garmin LIDAR-Lite V4/LED @ 0x62
 //const uint16_t LIDAR_MODE_PIN = 3; //LIDAR MODE pin (continuous mode)
@@ -286,7 +297,8 @@ bool gl_bChgConnect = false;
 //Sensor data values
 //03/01/22 rev to store all dists in cm vs mm
 float gl_RearCm; //added 10/24/20
-Stream* gl_pSerPort = 0; //09/26/22 made global so can use everywhere.
+//Stream* gl_pSerPort = 0; //09/26/22 made global so can use everywhere.
+Print* gl_pSerPort = 0; //09/26/22 made global so can use everywhere.
 float gl_ElapsedSec = 0; //03/18/23
 elapsedMillis gl_ElapsedRunMillisec = 0; //03/18/23
 
@@ -341,137 +353,157 @@ SimplePID pid;
 
 //// ====================== SHARED HELPER ======================
 // ====================== turnDegrees() Must be here due to default param def ======================
-void turnDegrees(float turnDeg, float targetDegPerSec = 15.0)
-{
-  updateHeadingAndStationaryReset(); //updates gl_IMUHdgValDeg
-  float startHeading = gl_IMUHdgValDeg;
-  float targetHeading = startHeading + turnDeg;
-
-  Serial.print("=== Starting turn to ");
-  Serial.print(turnDeg, 1);
-  Serial.print(" deg at ");
-  Serial.print(targetDegPerSec, 1);
-  Serial.println(" deg/s ===");
-
-  Serial.printf("Sec\tDeg\tError\tTgtR\tActR\tPID_PWM\n");
-
-  pid.integral = 0.0;
-  pid.prevError = 0.0;
-
-  unsigned long turnStartTime = millis();
-
-
-  //fwd half-speed, 
-  //digitalWrite(LEFT_IN1, HIGH);
-  //analogWrite(LEFT_IN2, 128);
-  //digitalWrite(RIGHT_IN1, HIGH);
-  //analogWrite(RIGHT_IN2, 128);
-
-  delay(1000);
-
-  //digitalWrite(LEFT_IN1, LOW);
-  //digitalWrite(LEFT_IN2, LOW);
-
-  ////right motor runs backward slowly after stop
-  //digitalWrite(RIGHT_IN1, LOW);
-  //digitalWrite(RIGHT_IN2, LOW);
-
-  ////right motor runs forward at half speed after stop
-  //digitalWrite(RIGHT_IN1, HIGH);
-  //digitalWrite(RIGHT_IN2, HIGH);
-
-
-  while (true)
-  {
-    updateHeadingAndStationaryReset();
-
-    float error = targetHeading - gl_IMUHdgValDeg;
-
-    float dt = (micros() - prevTime) / 1000000.0f;
-    pid.integral += error * dt;
-    float derivative = (error - pid.prevError) / dt;
-    float pidOutput = pid.kp * error + pid.ki * pid.integral + pid.kd * derivative;
-    pid.prevError = error;
-
-    // Drive motors with corrected direction
-    //setMotor(LEFT_DIR_PIN, LEFT_PWM_PIN, -pidOutput);   // flipped
-    //setMotor(RIGHT_DIR_PIN, RIGHT_PWM_PIN, pidOutput);   // flipped
-
-    RunBothMotorsBidirectional(int(-pidOutput), int(pidOutput));
-
-    static unsigned long lastTelemetry = 0;
-    if (millis() - lastTelemetry >= 100)
-    {
-      Serial.printf("%lu\t%6.2f\t%6.2f\t%5.2f\t%5.2f\t%d\n",
-        millis() / 1000, gl_IMUHdgValDeg, error, targetDegPerSec,
-        (mpu.getRotationZ() / GYRO_Z_SENSITIVITY),
-        (int)pidOutput);
-      lastTelemetry = millis();
-    }
-
-    if (abs(error) < TURN_TERMINATION_ERROR_THRESHOLD)
-    {
-      Serial.println("=== Turn complete ===");
-      break;
-    }
-
-    if (millis() - turnStartTime > 30000)
-    {
-      Serial.println("=== Turn timeout ===");
-      break;
-    }
-  }
-
-  // Stop motors
-  //analogWrite(LEFT_PWM_PIN, 0);
-  //analogWrite(RIGHT_PWM_PIN, 0);
-  delay(500);
-}
+//void turnDegrees(float turnDeg, float targetDegPerSec = 15.0)
+//{
+//  updateHeadingAndStationaryReset(); //updates gl_IMUHdgValDeg
+//  float startHeading = gl_IMUHdgValDeg;
+//  float targetHeading = startHeading + turnDeg;
+//
+//  Serial.print("=== Starting turn to ");
+//  Serial.print(turnDeg, 1);
+//  Serial.print(" deg at ");
+//  Serial.print(targetDegPerSec, 1);
+//  Serial.println(" deg/s ===");
+//
+//  Serial.printf("Sec\tDeg\tError\tTgtR\tActR\tPID_PWM\n");
+//
+//  pid.integral = 0.0;
+//  pid.prevError = 0.0;
+//
+//  unsigned long turnStartTime = millis();
+//
+//
+//  //fwd half-speed, 
+//  //digitalWrite(LEFT_IN1, HIGH);
+//  //analogWrite(LEFT_IN2, 128);
+//  //digitalWrite(RIGHT_IN1, HIGH);
+//  //analogWrite(RIGHT_IN2, 128);
+//
+//  delay(1000);
+//
+//  //digitalWrite(LEFT_IN1, LOW);
+//  //digitalWrite(LEFT_IN2, LOW);
+//
+//  ////right motor runs backward slowly after stop
+//  //digitalWrite(RIGHT_IN1, LOW);
+//  //digitalWrite(RIGHT_IN2, LOW);
+//
+//  ////right motor runs forward at half speed after stop
+//  //digitalWrite(RIGHT_IN1, HIGH);
+//  //digitalWrite(RIGHT_IN2, HIGH);
+//
+//
+//  while (true)
+//  {
+//    updateHeadingAndStationaryReset();
+//
+//    float error = targetHeading - gl_IMUHdgValDeg;
+//
+//    float dt = (micros() - prevTime) / 1000000.0f;
+//    pid.integral += error * dt;
+//    float derivative = (error - pid.prevError) / dt;
+//    float pidOutput = pid.kp * error + pid.ki * pid.integral + pid.kd * derivative;
+//    pid.prevError = error;
+//
+//    // Drive motors with corrected direction
+//    //setMotor(LEFT_DIR_PIN, LEFT_PWM_PIN, -pidOutput);   // flipped
+//    //setMotor(RIGHT_DIR_PIN, RIGHT_PWM_PIN, pidOutput);   // flipped
+//
+//    RunBothMotorsBidirectional(int(-pidOutput), int(pidOutput));
+//
+//    static unsigned long lastTelemetry = 0;
+//    if (millis() - lastTelemetry >= 100)
+//    {
+//      Serial.printf("%lu\t%6.2f\t%6.2f\t%5.2f\t%5.2f\t%d\n",
+//        millis() / 1000, gl_IMUHdgValDeg, error, targetDegPerSec,
+//        (mpu.getRotationZ() / GYRO_Z_SENSITIVITY),
+//        (int)pidOutput);
+//      lastTelemetry = millis();
+//    }
+//
+//    if (abs(error) < TURN_TERMINATION_ERROR_THRESHOLD)
+//    {
+//      Serial.println("=== Turn complete ===");
+//      break;
+//    }
+//
+//    if (millis() - turnStartTime > 30000)
+//    {
+//      Serial.println("=== Turn timeout ===");
+//      break;
+//    }
+//  }
+//
+//  // Stop motors
+//  //analogWrite(LEFT_PWM_PIN, 0);
+//  //analogWrite(RIGHT_PWM_PIN, 0);
+//  delay(500);
+//}
 
 void setup()
 {
-  //Serial.begin(115200);
-  //while (!Serial);
-  //while (Serial.available()) Serial.read();
 
 #pragma region PIN INITIALIZATION
 
   pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(XSHUT_PIN, OUTPUT);
 
 #pragma region Second Deck Pins
-  pinMode(RED_LASER_DIODE_PIN, OUTPUT);
+  //pinMode(RED_LASER_DIODE_PIN, OUTPUT);
   //pinMode(LIDAR_MODE_PIN, INPUT);//02/23/23 rem - now using Garmin LIDAR V4/LED at 0x62
 #pragma endregion Second Deck Pins
 
 #pragma region Charge_Support_Pins
-  //current sensor pins
-  pinMode(RUN_CURR_PIN, INPUT); //02/24/19 now connected to 'Run Current' 1NA619 charge current sensor
-  digitalWrite(RUN_CURR_PIN, LOW); //turn off the internal pullup resistor
+  ////current sensor pins
+  //pinMode(RUN_CURR_PIN, INPUT); //02/24/19 now connected to 'Run Current' 1NA619 charge current sensor
+  //digitalWrite(RUN_CURR_PIN, LOW); //turn off the internal pullup resistor
 
-  pinMode(TOT_CURR_PIN, INPUT);//02/24/19 now connected to 'Total Current' 1NA619 charge current sensor
-  digitalWrite(TOT_CURR_PIN, LOW); //turn off the internal pullup resistor
+  //pinMode(TOT_CURR_PIN, INPUT);//02/24/19 now connected to 'Total Current' 1NA619 charge current sensor
+  //digitalWrite(TOT_CURR_PIN, LOW); //turn off the internal pullup resistor
 
-  //Battery Voltage Monitor pin
-  pinMode(BATT_MON_PIN, INPUT);
-  //digitalWrite(BATT_MON_PIN, LOW); //turn off the internal pullup resistor
+  ////Battery Voltage Monitor pin
+  //pinMode(BATT_MON_PIN, INPUT);
+  ////digitalWrite(BATT_MON_PIN, LOW); //turn off the internal pullup resistor
 
   //charge connect
-  pinMode(CHG_CONNECT_PIN, INPUT_PULLUP);  //goes LOW when chg cable connected
-  digitalWrite(CHG_CONNECT_PIN, HIGH); //01/09/22 needed now that InitAllPins() forces it LOW
+  //pinMode(CHG_CONNECT_PIN, INPUT_PULLUP);  //goes LOW when chg cable connected
+  //digitalWrite(CHG_CONNECT_PIN, HIGH); //01/09/22 needed now that InitAllPins() forces it LOW
 
-  //charge connect status display pin (this will eventually be one of the LEDs on the rear LED panel)
-  pinMode(CHG_CONNECT_LED_PIN, OUTPUT);  //12/16/20 lights LED when chg cable connected
-  pinMode(_60PCT_LED_PIN, OUTPUT);
-  pinMode(CHG_FIN_LED_PIN, OUTPUT);
-  pinMode(_80PCT_LED_PIN, OUTPUT);
-  pinMode(_40PCT_LED_PIN, OUTPUT);
-  pinMode(_20PCT_LED_PIN, OUTPUT);
+  ////charge connect status display pin (this will eventually be one of the LEDs on the rear LED panel)
+  //pinMode(CHG_CONNECT_LED_PIN, OUTPUT);  //12/16/20 lights LED when chg cable connected
+  //pinMode(_60PCT_LED_PIN, OUTPUT);
+  //pinMode(CHG_FIN_LED_PIN, OUTPUT);
+  //pinMode(_80PCT_LED_PIN, OUTPUT);
+  //pinMode(_40PCT_LED_PIN, OUTPUT);
+  //pinMode(_20PCT_LED_PIN, OUTPUT);
 
   Serial.printf("In setup() just before EnableAllRearLEDs\n");
 
   EnableAllRearLEDs(false); //turns all LEDs OFF
 
 #pragma endregion Charge_Support_Pins
+
+#pragma region SENSOR PIN INITIALIZATION //ported from VL53L1X_Demo.ino
+  pinMode(I_BOT_PIN, INPUT); //02/24/19 now connected to bottom deck 1NA619 charge current sensor
+  digitalWrite(I_BOT_PIN, LOW); //turn off the internal pullup resistor
+
+  pinMode(I_TOP_PIN, INPUT);//02/24/19 now connected to top deck 1NA619 charge current sensor
+  digitalWrite(I_TOP_PIN, LOW); //turn off the internal pullup resistor
+
+  pinMode(I_CHG_PIN, INPUT);//02/24/19 now connected to battery pack charge current sensor
+  digitalWrite(I_CHG_PIN, LOW); //turn off the internal pullup resistor
+
+  //Battery Voltage Monitor pin
+  pinMode(SW_BATT_VOLT_PIN, INPUT);
+  //digitalWrite(BATT_MON_PIN, LOW); //turn off the internal pullup resistor
+
+  pinMode(XSHUT_PIN, OUTPUT); //VL53L1X rear distance sensor reset pin
+
+  //charge connect
+  pinMode(CHG_CONNECT_PIN, INPUT_PULLUP);  //goes LOW when chg cable connected
+  digitalWrite(CHG_CONNECT_PIN, HIGH); //01/09/22 needed now that InitAllPins() forces it LOW
+
+#pragma endregion SENSOR PIN INITIALIZATION
 
 #pragma region Motor_Pins
   //motor pins
@@ -490,50 +522,60 @@ void setup()
   Serial.begin(115200);
   delay(2000); //10/06/21 - just use fixed delay instead
 
+  Serial.begin(115200);
+  delay(2000);
   Serial1.begin(115200);
-  delay(2000); //11/20/21 use fixed delay instead of waiting
+  delay(2000);
 
-  if (Serial)
-  {
-    Serial.printf("Serial port active\n");
-    gl_pSerPort = (Stream*)&Serial;
-  }
-  else if (Serial1)
-  {
-    Serial.printf("Serial1 port active\n");
-    gl_pSerPort = (Stream*)&Serial1;
-  }
+  // Always point the global at the tee
+  gl_pSerPort = &tee;
 
-  gl_pSerPort->printf("gl_pSerPort now points to active Serial (USB or Wixel)\n");
+  // Optional diagnostic (will appear on both ports)
+  gl_pSerPort->printf("gl_pSerPort now points to TeePrint (Serial + Serial1)\n");
 
-  //02/25/23 added for Garmin LIDAR-Lite V4/LED use
-  Serial2.begin(115200);
-  delay(2000); //11/20/21 use fixed delay instead of waiting
+
+  ////02/25/23 added for Garmin LIDAR-Lite V4/LED use
+  //Serial2.begin(115200);
+  //delay(2000); //11/20/21 use fixed delay instead of waiting
 
 #pragma endregion SERIAL_PORTS
 
 #pragma region I2C_PORTS
   //I2C bus
   Wire.begin();
+  Wire.setClock(400000);
 
-  ////01/31/22 added to enable internal pullups on Wire - the I2C bus connected to 
-  ////the T3.2 IR Homing processor and the MPU6050 MPU (the MPU does have internal 4.7K pullups installed)
-  //CORE_PIN19_CONFIG = PORT_PCR_PE | PORT_PCR_PS | PORT_PCR_MUX(2);
-  //CORE_PIN18_CONFIG = PORT_PCR_PE | PORT_PCR_PS | PORT_PCR_MUX(2);
+  // Use Wire1 instead of Wire for rear LIDAR
+  Wire1.begin();
+  Wire1.setClock(400000);
 
-  //Wire1.begin();
-
-  ////01/31/22 added to enable internal pullups on Wire1 - the I2C buss connected to the T3.5 VL53L0X array processor 
-  //CORE_PIN37_CONFIG = PORT_PCR_PE | PORT_PCR_PS | PORT_PCR_MUX(2);
-  //CORE_PIN38_CONFIG = PORT_PCR_PE | PORT_PCR_PS | PORT_PCR_MUX(2);
-
-  //Wire2.begin();
-
-  //02/25/23 added to enable internal pullups on Wire2 - the I2C buss connected to the Garmin LIDAR-Lite V4/LED
-  //03/08/23 c/o - prevents connection to Garmin LIDAR - don't know why
-  //CORE_PIN3_CONFIG = PORT_PCR_PE | PORT_PCR_PS | PORT_PCR_MUX(2);
-  //CORE_PIN4_CONFIG = PORT_PCR_PE | PORT_PCR_PS | PORT_PCR_MUX(2);
 #pragma endregion I2C_PORTS
+
+#pragma region REAR LIDAR
+
+  // Reset the sensor
+  pinMode(XSHUT_PIN, OUTPUT);
+  digitalWrite(XSHUT_PIN, LOW);
+  delay(10);
+  digitalWrite(XSHUT_PIN, HIGH);
+  delay(20);
+
+  lidar_Rear.setBus(&Wire1);          // <-- this is the key line
+  lidar_Rear.setTimeout(500);
+
+  if (!lidar_Rear.init())
+  {
+    Serial.println("Failed to detect and initialize VL53L1X on Wire1!");
+    while (1);
+  }
+
+  Serial.println("VL53L1X detected on Wire1 and initialized");
+
+  lidar_Rear.setDistanceMode(VL53L1X::Long);
+  lidar_Rear.setMeasurementTimingBudget(50000);
+  lidar_Rear.startContinuous(50);
+
+#pragma endregion REAR LIDAR
 
   CheckForUserInput(); //01/13/22 - here so OTA procedure can maybe start faster
   // 03/06/23 commented out - Garmin LIDAR won't connect on Wire2 with these lines active
@@ -611,15 +653,37 @@ void setup()
 
   CheckForUserInput(); //01/13/22 - here so OTA procedure can maybe start faster
 
+  //LoopTelemStr = "Time\tBattV\tBotI\tChgI\tRearCm\tHdg";
+  //Serial.println(LoopTelemStr);
+  //Serial1.println(LoopTelemStr);
+  gl_pSerPort->println(LoopTelemStr);
 }
 
 void loop()
 {
+  //added so Pi5 can control robot motors
   CheckForUserInput();
+
+  digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+
+  //added 10/23/20 for rear sensor
+  gl_RearCm = (float)lidar_Rear.read() / 10.0;
+  float BattV = GetVoltage(SW_BATT_VOLT_PIN);
+  float TopI = GetAmps(I_TOP_PIN);
+  float BotI = GetAmps(I_BOT_PIN);
+  float ChgI = GetAmps(I_CHG_PIN);
+  UpdateIMUHdgValDeg(); //updates IMUHdgValDeg
+
+  //Serial.printf("\Msec\tBattV\tTop_I\tBot_I\tChg_I\tRear_mm\n");
+  //Serial.printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, IMUHdgValDeg);
+  //Serial1.printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, IMUHdgValDeg);
+  gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, IMUHdgValDeg);
+
   delay(200); //08/17/23 put in to make sure distances are current
 }
 
 
+////Added 08/04/26
 ////Added 08/04/26
 #pragma region MOTOR_SUPPORT
 //09/08/20 modified for DRV8871 motor driver
@@ -932,71 +996,8 @@ bool IsRightMotorStopped()
   return (digitalRead(InA_Right) == LOW) && (digitalRead(InB_Right) == LOW);
 }
 #pragma endregion MOTOR_SUPPORT
-//// ====================== SHARED HELPER ======================
-void updateHeadingAndStationaryReset()
-{
-  //DEBUG!!
-  unsigned long now = micros();
-  float dt = (now - prevTime) / 1000000.0f;
-  prevTime = now;
 
-  int16_t gz = mpu.getRotationZ();
-  float rate = gz / GYRO_Z_SENSITIVITY;
-  gl_IMUHdgValDeg += rate * dt;
-  Serial.printf("%d\t%2.3f\t%2.3f\t %2.3f\n", gz, GYRO_Z_SENSITIVITY, rate, gl_IMUHdgValDeg);
-
-  if (abs(gz) < STATIONARY_THRESHOLD)
-  {
-    if (!isStationary)
-    {
-      stillStartTimeMsec = millis();
-      isStationary = true;
-    }
-    if (millis() - stillStartTimeMsec > STATIONARY_TIME)
-    {
-      if (abs(gl_IMUHdgValDeg) > 0.5f)
-      {
-        Serial.print(">>> Heading auto-reset to 0.0 (was ");
-        Serial.print(gl_IMUHdgValDeg, 2);
-        Serial.println(")");
-      }
-      gl_IMUHdgValDeg = 0.0f;
-    }
-  }
-  else
-  {
-    isStationary = false;
-  }
-}
-//
-//// ====================== MOTOR CONTROL (deadband + correct direction) ======================
-//void setMotor(int dirPin, int pwmPin, float pidOutput)
-//{
-//  float absOut = abs(pidOutput);
-//  if (absOut < 100.0f)   // deadband � motors need ~80-100 to start moving
-//  {
-//    analogWrite(pwmPin, 0);
-//    return;
-//  }
-//
-//  int pwm = constrain((int)absOut, 100, 255);
-//
-//  // Flipped polarity so +pidOutput = CW turn (your desired convention)
-//  if (pidOutput > 0)
-//  {
-//    digitalWrite(dirPin, HIGH);
-//    analogWrite(pwmPin, pwm);
-//  }
-//  else
-//  {
-//    digitalWrite(dirPin, LOW);
-//    analogWrite(pwmPin, pwm);
-//  }
-//}
-//
-//#pragma endregion Motor Support Functions
-//
-//#pragma region IR_HOMING_SUPPORT
+#pragma region IR_HOMING_SUPPORT
 //void IRHomingNavigateToIAP()
 //{
 //  //Purpose:  Navigate to Initial Approach Point for charge station homing
@@ -2028,336 +2029,8 @@ void updateHeadingAndStationaryReset()
 //  IRHomingValTotalAvg = 0;
 //  gl_pSerPort->printf("Done\n", millis());
 //}
-//#pragma endregion IR_HOMING_SUPPORT
-//
-//#pragma region VL53L0X_SUPPORT
-//void WaitForVL53L0XTeensy()
-//{
-//  gl_bVL53L0X_TeensyReady = false;
-//  while (!gl_bVL53L0X_TeensyReady)
-//  {
-//    CheckForUserInput();//06/06/22 bugfix
-//    GetRequestedVL53l0xValues(VL53L0X_READYCHECK); //this updates gl_bVL53L0X_TeensyReady
-//    gl_pSerPort->printf("%lu: got %d from VL53L0X Teensy\n", millis(), gl_bVL53L0X_TeensyReady);
-//    delay(100);
-//  }
-//
-//  gl_pSerPort->printf("Teensy setup() finished at %lu mSec\n", millis());
-//
-//  //now try to get a VL53L0X measurement
-//  //11/08/20 rev to loop until all distance sensors provide valid data
-//
-//  //gl_pSerPort->printf("Msec\tLFront\tLCtr\tLRear\tRFront\tRCtr\tRRear\tRear\n");
-//
-//  GetRequestedVL53l0xValues(VL53L0X_ALL);
-//
-//  //05/02/23 added a try limit
-//  uint16_t sensor_tries = 0;
-//  while ((gl_LeftFrontCm <= 0 || gl_LeftCenterCm <= 0 || gl_LeftRearCm <= 0
-//    || gl_LeftFrontCm <= 0 || gl_LeftCenterCm <= 0 || gl_LeftRearCm <= 0
-//    || gl_RearCm <= 0) && sensor_tries <= 100)
-//  {
-//    GetRequestedVL53l0xValues(VL53L0X_ALL);
-//    delay(100);
-//    sensor_tries++;
-//    gl_pSerPort->printf("try %d of 100 failed\n", sensor_tries);
-//  }
-//
-//  if (sensor_tries >= 100)
-//  {
-//    gl_pSerPort->printf("one or more distance sensors failed to respond - quitting!\n");
-//    while (true)
-//    {
-//      CheckForUserInput();
-//    }
-//  }
-//
-//  gl_pSerPort->printf("VL53L0X Teensy Ready at %lu\n\n", millis());
-//}
-//
-////01/24/21 revised to implement error reporting
-//bool GetRequestedVL53l0xValues(VL53L0X_REQUEST which)
-//{
-//  //Purpose: Obtain VL53L0X ToF sensor data from Teensy sensor handler
-//  //Inputs: 
-//  //	which = VL53L0X_REQUEST value denoting which combination of value to retrieve
-//  //		VL53L0X_CENTERS_ONLY -> Just the left/right center sensor values
-//  //		VL53L0X_RIGHT -> All three right sensor values, in front/center/rear order
-//  //		VL53L0X_LEFT -> All three left sensor values, in front/center/rear order
-//  //		VL53L0X_ALL -> All seven sensor values, in left/right front/center/rear/rear order
-//  //		VL53L0X_REAR_ONLY -> added 10/24/20 Just the rear sensor reading
-//
-//  //Outputs: 
-//  //	Requested sensor values, obtained via I2C from the VL53L0X sensor handler
-//  //	Returns TRUE if data retrieval successful, otherwise FALSE
-//  //Plan:
-//  //	Step1: Send request to VL53L0X handler
-//  //	Step2: get the requested data
-//  //Notes:
-//  // Copied from FourWD_WallE2_V4.ino's IsIRBeamAvail() and adapted
-//    // 08/05/20 added a VL53L0X_ALL request type
-//    // 01/24/21 added error detection/reporting
-//    // 01/16/22 rev to use I2C_Anything1 functions for Wire1
-//    // 06/30/22   RightSteeringVal = (RF_Dist_mm - RR_Dist_mm) /100.f; //rev 06/21/20 see PPalace post
-//    //            LeftSteeringVal = (LF_Dist_mm - LR_Dist_mm) /100.f; //rev 06/21/20 see PPalace post
-//    // 02/16/23 limit L/R/Rear measurements jump from about 110-120 to 785.  Limit to MAX_LR_DISTANCE_CM (200cm).
-//
-//  //Step1: Send request to VL53L0X handler
-//  //DEBUG!!
-//    //gl_pSerPort->printf("Sending %d to slave\n", which);
-//  //DEBUG!!
-//
-//  //gl_pSerPort->printf("In GetRequestedVL53l0xValues(%d)\n", (int)which);
-//
-//  //03/01/22 rev to cvt all readings to cm
-//  uint16_t Lidar_RightFrontMM = 0;
-//  uint16_t Lidar_RightCenterMM = 0;
-//  uint16_t Lidar_RightRearMM = 0;
-//  uint16_t Lidar_RearMM = 0;
-//
-//  uint16_t Lidar_LeftFrontMM = 0;
-//  uint16_t Lidar_LeftCenterMM = 0;
-//  uint16_t Lidar_LeftRearMM = 0;
-//
-//
-//  Wire1.beginTransmission(VL53L0X_I2C_SLAVE_ADDRESS);
-//  I2C_writeAnything((uint8_t)which, &Wire1);
-//  Wire1.endTransmission();
-//
-//
-//  //Step2: get the requested data
-//  int readResult = 0;
-//  int data_size = 0;
-//  switch (which)
-//  {
-//  case VL53L0X_READYCHECK: //11/10/20 added to prevent bad reads during Teensy setup()
-//    Wire1.requestFrom(VL53L0X_I2C_SLAVE_ADDRESS, (uint16_t)(sizeof(gl_bVL53L0X_TeensyReady)));
-//    readResult = I2C_readAnything(gl_bVL53L0X_TeensyReady, &Wire1);
-//    break;
-//
-//  case VL53L0X_CENTERS_ONLY:
-//    //just two data values needed here
-//    data_size = 2 * sizeof(uint16_t);
-//    Wire1.requestFrom(VL53L0X_I2C_SLAVE_ADDRESS, (uint16_t)(2 * sizeof(Lidar_RightCenterMM)));
-//    readResult = I2C_readAnything(Lidar_RightCenterMM, &Wire1);
-//    gl_RightCenterCm = Lidar_RightCenterMM / 10.0;
-//
-//    if (readResult > 0)
-//    {
-//      I2C_readAnything(Lidar_LeftCenterMM, &Wire1);
-//      gl_LeftCenterCm = Lidar_LeftCenterMM / 10.0;
-//    }
-//
-//    //DEBUG!!
-//        //gl_pSerPort->printf("VL53L0X_CENTERS_ONLY case: Got LC/RC = %d, %d\n", Lidar_LeftCenterMM, Lidar_RightCenterMM);
-//    //DEBUG!!
-//
-//    break;
-//  case VL53L0X_RIGHT:
-//    //four data values needed here
-//    data_size = 3 * sizeof(uint16_t) + sizeof(float);
-//
-//    //DEBUG!!
-//        //gl_pSerPort->printf("data_size = %d\n", data_size);
-//    //DEBUG!!
-//
-//    Wire1.requestFrom(VL53L0X_I2C_SLAVE_ADDRESS, data_size);
-//    readResult = I2C_readAnything(Lidar_RightFrontMM, &Wire1);
-//    gl_RightFrontCm = Lidar_RightFrontMM / 10.0;
-//
-//    if (readResult > 0)
-//    {
-//      readResult = I2C_readAnything(Lidar_RightCenterMM, &Wire1);
-//      gl_RightCenterCm = Lidar_RightCenterMM / 10.0;
-//    }
-//    if (readResult > 0)
-//    {
-//      readResult = I2C_readAnything(Lidar_RightRearMM, &Wire1);
-//      gl_RightRearCm = Lidar_RightRearMM / 10.0;
-//    }
-//    if (readResult > 0)
-//    {
-//      readResult = I2C_readAnything(gl_RightSteeringVal, &Wire1);
-//    }
-//
-//    //DEBUG!!
-//        //gl_pSerPort->printf("VL53L0X_RIGHT case: Got L/C/R/S = %d, %d, %d, %3.2f\n",
-//        //	gl_RightFrontCm, Lidar_RightCenterMM, Lidar_RightRearMM, ToFSteeringVal);
-//    //DEBUG!!
-//
-//    break;
-//  case VL53L0X_LEFT:
-//    //four data values needed here
-//    //data_size = 3 * sizeof(int) + sizeof(float);
-//    data_size = 3 * sizeof(uint16_t) + sizeof(float);
-//
-//    Wire1.requestFrom(VL53L0X_I2C_SLAVE_ADDRESS, data_size);
-//    readResult = I2C_readAnything(Lidar_LeftFrontMM, &Wire1);
-//    gl_LeftFrontCm = Lidar_LeftFrontMM / 10.0;
-//
-//    if (readResult > 0)
-//    {
-//      readResult = I2C_readAnything(Lidar_LeftCenterMM, &Wire1);
-//      gl_LeftCenterCm = Lidar_LeftCenterMM / 10.0;
-//    }
-//    if (readResult > 0)
-//    {
-//      readResult = I2C_readAnything(Lidar_LeftRearMM, &Wire1);
-//      gl_LeftRearCm = Lidar_LeftRearMM / 10.0;
-//    }
-//    if (readResult > 0)
-//    {
-//      readResult = I2C_readAnything(gl_LeftSteeringVal, &Wire1);
-//    }
-//
-//    //DEBUG!!
-//        //gl_pSerPort->printf("VL53L0X_RIGHT case: Got L/C/R/S = %d, %d, %d, %3.2f\n",
-//        //	Lidar_LeftFrontMM, Lidar_LeftCenterMM, Lidar_LeftRearMM, ToFSteeringVal);
-//    //DEBUG!!
-//
-//    break;
-//  case VL53L0X_ALL: //added 08/05/20, chg to VL53L0X_ALL 10/31/20
-//    //nine data values needed here - 7 ints and 2 floats
-//    data_size = 7 * sizeof(uint16_t) + 2 * sizeof(float); //10/31/20 added rear distance
-//
-//    //gl_pSerPort->printf("In VL53L0X_ALL case with data_size = %d\n", data_size);
-//
-//    Wire1.requestFrom(VL53L0X_I2C_SLAVE_ADDRESS, data_size);
-//
-//    //Lidar_LeftFrontMM
-//    readResult = I2C_readAnything(Lidar_LeftFrontMM, &Wire1);
-//    gl_LeftFrontCm = Lidar_LeftFrontMM / 10.0;
-//
-//    if (readResult != sizeof(Lidar_LeftFrontMM))
-//    {
-//      gl_pSerPort->printf("Error reading Lidar_LeftFrontMM\n");
-//    }
-//
-//    //Lidar_LeftCenterMM
-//    readResult = I2C_readAnything(Lidar_LeftCenterMM, &Wire1);
-//    gl_LeftCenterCm = Lidar_LeftCenterMM / 10.0;
-//
-//    if (readResult != sizeof(Lidar_LeftCenterMM))
-//    {
-//      gl_pSerPort->printf("Error reading Lidar_LeftCenterMM\n");
-//    }
-//
-//    //Lidar_LeftRearMM
-//    readResult = I2C_readAnything(Lidar_LeftRearMM, &Wire1);
-//    gl_LeftRearCm = Lidar_LeftRearMM / 10.0;
-//
-//    if (readResult != sizeof(Lidar_LeftRearMM))
-//    {
-//      gl_pSerPort->printf("Error reading Lidar_LeftRearMM\n");
-//    }
-//
-//    //gl_LeftSteeringVal
-//    readResult = I2C_readAnything(gl_LeftSteeringVal, &Wire1);
-//    if (readResult != sizeof(gl_LeftSteeringVal))
-//    {
-//      gl_pSerPort->printf("Error reading gl_LeftSteeringVal\n");
-//    }
-//
-//    //Lidar_RightFrontMM
-//    readResult = I2C_readAnything(Lidar_RightFrontMM, &Wire1);
-//    gl_RightFrontCm = Lidar_RightFrontMM / 10.0;
-//
-//    if (readResult != sizeof(Lidar_RightFrontMM))
-//    {
-//      gl_pSerPort->printf("Error reading Lidar_RightFrontMM\n");
-//    }
-//
-//    //Lidar_RightCenterMM
-//    readResult = I2C_readAnything(Lidar_RightCenterMM, &Wire1);
-//    gl_RightCenterCm = Lidar_RightCenterMM / 10.0;
-//
-//    if (readResult != sizeof(Lidar_RightCenterMM))
-//    {
-//      gl_pSerPort->printf("Error reading Lidar_RightCenterMM\n");
-//    }
-//
-//    //Lidar_RightRearMM
-//    readResult = I2C_readAnything(Lidar_RightRearMM, &Wire1);
-//    gl_RightRearCm = Lidar_RightRearMM / 10.0;
-//
-//    if (readResult != sizeof(Lidar_RightRearMM))
-//    {
-//      gl_pSerPort->printf("Error reading Lidar_RightRearMM\n");
-//    }
-//
-//    //Lidar_RearMM
-//    readResult = I2C_readAnything(Lidar_RearMM, &Wire1);
-//    //gl_pSerPort->printf("Lidar_RearMM = %d\n", Lidar_RearMM);
-//    gl_RearCm = Lidar_RearMM / 10.0;
-//    if (readResult != sizeof(Lidar_RearMM))
-//    {
-//      gl_pSerPort->printf("Error reading Lidar_RearMM\n");
-//    }
-//
-//    //gl_RightSteeringVal
-//    readResult = I2C_readAnything(gl_RightSteeringVal, &Wire1);
-//    if (readResult != sizeof(gl_RightSteeringVal))
-//    {
-//      gl_pSerPort->printf("Error reading gl_RightSteeringVal\n");
-//    }
-//
-//    //gl_pSerPort->printf("%lu: VL53l0x - %d, %d, %d, %d, %d, %d, %d\n",
-//    //	millis(), 
-//    //	Lidar_LeftFrontMM, Lidar_LeftCenterMM, Lidar_LeftRearMM,
-//    //  Lidar_RightFrontMM, Lidar_RightCenterMM, Lidar_RightRearMM,
-//    //	Lidar_RearMM);
-//    break; //10/31/20 bugfix
-//
-//  case VL53L0X_REAR_ONLY:
-//    //just ONE data value needed here
-//    data_size = sizeof(uint16_t);
-//    Wire1.requestFrom(VL53L0X_I2C_SLAVE_ADDRESS, (uint16_t)(sizeof(Lidar_RearMM)));
-//    readResult = I2C_readAnything(Lidar_RearMM, &Wire1);
-//    gl_RearCm = Lidar_RearMM / 10.0;
-//
-//    //DEBUG!!
-//        //gl_pSerPort->printf("In  VL53L0X_REAR_ONLY case with Lidar_RearMM = %d, gl_RearCm = %2.1f\n", Lidar_RearMM, gl_RearCm);
-//    //DEBUG!!
-//
-//    break;
-//
-//  default:
-//    break;
-//  }
-//  //gl_pSerPort->printf("GetRequestedVL53l0xValues(): LR/LC/LF/RR/RC/RF/R = %d\t%d\t%d\t%d\t%d\t%d\t%d\n",
-//  //  Lidar_LeftRearMM, Lidar_LeftCenterMM, Lidar_LeftFrontMM,
-//  //  Lidar_RightRearMM, Lidar_RightCenterMM, gl_RightFrontCm, Lidar_RearMM);
-//
-//  //02/16/23 limit L/R/Rear measurements jump from about 110-120 to 785.  Limit to 200cm.
-//  gl_RightFrontCm = (gl_RightFrontCm > MAX_LR_DISTANCE_CM) ? MAX_LR_DISTANCE_CM : gl_RightFrontCm;
-//  gl_RightCenterCm = (gl_RightCenterCm > MAX_LR_DISTANCE_CM) ? MAX_LR_DISTANCE_CM : gl_RightCenterCm;
-//  gl_RightRearCm = (gl_RightRearCm > MAX_LR_DISTANCE_CM) ? MAX_LR_DISTANCE_CM : gl_RightRearCm;
-//
-//  gl_LeftFrontCm = (gl_LeftFrontCm > MAX_LR_DISTANCE_CM) ? MAX_LR_DISTANCE_CM : gl_LeftFrontCm;
-//  gl_LeftCenterCm = (gl_LeftCenterCm > MAX_LR_DISTANCE_CM) ? MAX_LR_DISTANCE_CM : gl_LeftCenterCm;
-//  gl_LeftRearCm = (gl_LeftRearCm > MAX_LR_DISTANCE_CM) ? MAX_LR_DISTANCE_CM : gl_LeftRearCm;
-//
-//  gl_RearCm = (gl_RearCm > MAX_REAR_DISTANCE_CM) ? MAX_REAR_DISTANCE_CM : gl_RearCm;
-//
-//  //07/10/22 constrain L/R steering values to -1 <= val <= +1. this corresponds to a front/rear delta_d of 10cm 
-//  if (abs(gl_LeftSteeringVal) > 1)
-//  {
-//    gl_LeftSteeringVal = (gl_LeftSteeringVal < -1) ? -1 : gl_LeftSteeringVal;
-//    gl_LeftSteeringVal = (gl_LeftSteeringVal > 1) ? 1 : gl_LeftSteeringVal;
-//    //gl_pSerPort->printf("GetRequestedVL53L0xValues: gl_LeftSteeringVal truncated to %2.1f\n", gl_LeftSteeringVal);
-//  }
-//
-//  if (abs(gl_RightSteeringVal) > 1)
-//  {
-//    gl_RightSteeringVal = (gl_RightSteeringVal < -1) ? -1 : gl_RightSteeringVal;
-//    gl_RightSteeringVal = (gl_RightSteeringVal > 1) ? 1 : gl_RightSteeringVal;
-//    //gl_pSerPort->printf("GetRequestedVL53L0xValues: gl_RightSteeringVal truncated to %2.1f\n", gl_RightSteeringVal);
-//  }
-//
-//  return readResult > 0; //this is true only if all reads succeed
-//}
-//#pragma endregion VL53L0X_SUPPORT
-//
+#pragma endregion IR_HOMING_SUPPORT
+
 #pragma region CHARGE_SUPPORT_FUNCTIONS
 float GetAmps(int pin_number)
 {
@@ -2389,26 +2062,26 @@ bool IsStillCharging()
 {
   //Purpose:  Determine battery charge status
   //Inputs: 
-  //	Battry charging current in amps from GetBattChgAmps()
+  //	Battery charging current in amps from GetAmps(I_CHG_PIN)
   //	Battery voltage from GetBattV()
   //Outputs:
   //	returns TRUE if battery voltage is below full charge voltage threshold 
   //	AND charging current is above full charge current threshold.  Otherwise returns FALSE
 
   float BattV = GetBattVoltage();
-  float TotI = GetAmps(TOT_CURR_PIN);
-  float RunI = GetAmps(RUN_CURR_PIN);
+  float ChgI = GetAmps(I_CHG_PIN);//08/16/26
 
   //DEBUG!!
     //gl_pSerPort->printf("IsStillCharging(): BattV = %2.3f, TotI = %2.3f, RunI = %2.3f\n", BattV, TotI, RunI); 
 
   //DEBUG!!
 
-  return (BattV < FULL_BATT_VOLTS && TotI - RunI > FULL_BATT_CURRENT_THRESHOLD);
+  //return (BattV < FULL_BATT_VOLTS && TotI - RunI > FULL_BATT_CURRENT_THRESHOLD);
+  return (BattV < FULL_BATT_VOLTS && ChgI > FULL_BATT_CURRENT_THRESHOLD);
+
 }
 
 //11/2/23 chg curState param to reference so can directly update gl_bChgConnected
-//bool IsChargerConnected(bool curState)
 bool IsChargerConnected(bool& curState)
 {
   //Purpose: Determine if robot has connected to charger
@@ -2423,30 +2096,25 @@ bool IsChargerConnected(bool& curState)
   //  02/15/22 - pin now connected to photoresistor aimed at TP5100 status LED.  Goes LOW when charger connects
   //  10/02/23 - chg input param from bool to bool& to synch output & gl_bChgConnected states
 
-  //bool retStatus = curState;11/02/23 no longer used
   uint16_t  adval = (uint16_t)analogRead(CHG_CONNECT_PIN);
-  //gl_pSerPort->printf("%lu: adval = %d\n",
-    //millis(), adval);
+  //gl_pSerPort->printf("%lu: adval = %d\n", millis(), adval);
 
   if (adval <= CHG_CONNECTED_AVG_THRESHOLD) //low means 'connected'
   {
     curState = true;
-    //retStatus = true;
     //gl_pSerPort->printf("%lu: curState = %d, adval = %d, ConThresh = %d, disConThresh = %d retsatus = %d\n",
     //  millis(), curState, adval, CHG_CONNECTED_AVG_THRESHOLD, CHG_DISCONNECTED_AVG_THRESHOLD, retStatus);
   }
   else if (adval >= CHG_DISCONNECTED_AVG_THRESHOLD)
   {
     curState = false;
-    //retStatus = false;
     //gl_pSerPort->printf("%lu: curState = %d, adval = %d, ConThresh = %d, disConThresh = %d retsatus = %d\n",
     //  millis(), curState, adval, CHG_CONNECTED_AVG_THRESHOLD, CHG_DISCONNECTED_AVG_THRESHOLD, retStatus);
   }
 
   //gl_pSerPort->printf("%lu: curState = %d, adval = %d, ConThresh = %d, disConThresh = %d chgconnect = %d\n",
   //  millis(), curState, adval, CHG_CONNECTED_AVG_THRESHOLD, CHG_DISCONNECTED_AVG_THRESHOLD, gl_bChgConnect);
-  //else return previous conn/disconnect state
-  //return retStatus;
+
   return curState;//11/2/23 now gl_bChgConnected & ret val are synched for all three cases
 }
 
@@ -2495,12 +2163,12 @@ bool MonitorChargeUntilDone()
   {
     //04/02/21 moved to 'fast' part of loop
     float BattV = GetBattVoltage();
-    float TotI = GetAmps(TOT_CURR_PIN);
-    float RunI = GetAmps(RUN_CURR_PIN);
-    //EnableAllRearLEDs(false);//05/22/22 bugfix - do once, not every time through
+    //float TotI = GetAmps(TOT_CURR_PIN);
+    //float RunI = GetAmps(RUN_CURR_PIN);
+    float ChgI = GetAmps(I_CHG_PIN);
+
     UpdateChgStatusLEDs(BattV, bStillCharging); //updates 'fuel guage' LEDs 04/22/20 added bStillCharging to sig
     bStillCharging = IsStillCharging(); //02/24/19 - now using 1NA169 current sensor
-    //bChgConnect = IsChargerConnected(bChgConnect); //01/02/22 - wasn't being checked
     bChgConnect = IsChargerConnected(gl_bChgConnect); //01/02/22 - wasn't being checked
 
     //05/02/20 rev to only print out 10 times/min
@@ -2508,15 +2176,16 @@ bool MonitorChargeUntilDone()
     {
       ElapsedChgTimeMin = (float)ElapsedChgTimeSec / 60.f;
 
-      gl_pSerPort->printf("%3.1f\t%2.4f\t%2.4f\t%2.4f\t%2.4f\t%s\n",
-        ElapsedChgTimeMin, BattV, TotI, RunI, TotI - RunI, bChgConnect ? "TRUE" : "FALSE"); //rev 02/24/19 for 1Na169 sensor
+      //gl_pSerPort->printf("%3.1f\t%2.4f\t%2.4f\t%2.4f\t%2.4f\t%s\n",
+      //  ElapsedChgTimeMin, BattV, TotI, RunI, TotI - RunI, bChgConnect ? "TRUE" : "FALSE"); //rev 02/24/19 for 1Na169 sensor
+      gl_pSerPort->printf("%3.1f\t%2.4f\t%2.4f\t%s\n",
+        ElapsedChgTimeMin, BattV, ChgI, bChgConnect ? "TRUE" : "FALSE"); //rev 02/24/19 for 1Na169 sensor
+
     }
 
     CheckForUserInput(); //added 04/02/21
     delay(1000); //one-second loop
     ElapsedChgTimeSec++;
-    //bStillCharging = IsStillCharging(); //02/24/19 - now using 1NA169 current sensor
-    //bChgConnect = IsChargerConnected(bChgConnect); //01/02/22 - wasn't being checked
   }
 
   //Step2: Check for end-of-charge or failure (don't know what this would be yet...)
@@ -2544,7 +2213,8 @@ bool MonitorChargeUntilDone()
 float GetBattVoltage()
 {
   //02/18/17 get corrected battery voltage.  Voltage reading is 1/3 actual Vbatt value
-  int analog_batt_reading = analogRead(BATT_MON_PIN);//analogReadAveraging(8) in setup() does internal averaging
+  //int analog_batt_reading = analogRead(BATT_MON_PIN);//analogReadAveraging(8) in setup() does internal averaging
+  int analog_batt_reading = analogRead(SW_BATT_VOLT_PIN);//analogReadAveraging(8) in setup() does internal averaging
   float calc_volts = ZENER_VOLTAGE_OFFSET + ADC_REF_VOLTS * (float)analog_batt_reading / (float)MAX_AD_COUNT;
 
   //DEBUG!!
@@ -2754,8 +2424,9 @@ void UpdateChgStatusLEDs(float battv, bool bStillCharging) //04/22/20 added bSti
   }
 }
 #pragma endregion CHARGE_SUPPORT_FUNCTIONS
-//
-#pragma region MISCELLANEOUS
+
+#pragma region OTA & DIRECT MOTOR CONTROL
+
 //11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
 bool CheckForUserInput()
 {
@@ -2804,6 +2475,7 @@ bool CheckForUserInput()
     // enabled at the bottom of the serial port window
     //gl_pSerPort->readBytesUntil('\n', buff, sizeof(buff));
     Serial1.readBytesUntil('\n', buff, sizeof(buff));
+
     incomingByte = buff[0];
 
     // say what you got:
@@ -2818,177 +2490,527 @@ bool CheckForUserInput()
 }
 
 //09/17/22 added for use in situations where calling program manages serial input
-//void CheckForUserInput(char in_char)
-bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
+//bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
+//{
+//  //Purpose: Check for user override
+//  //Inputs: in_char = char object representing user override input
+//  //Outputs: override actions taken.  Returns if 'auto' mode selected
+//  //Notes:
+//  //  09/19/22 copied from CheckUserInput() and modified to accept char argument 
+//  //  09/28/22 'Aa' now causes a processor reboot
+//  //  11/04/23 '*' now causes fcn to return FALSE
+//
+//  //08/09/26 bumped bufflen to accomodate new 'Lnn.nn' and 'Rnn.nn' SpinTurn() commands
+//  //const int bufflen = 3;
+//  const int bufflen = 10;
+//  char buff[bufflen];
+//  memset(buff, 0, bufflen);
+//  byte incomingByte = 0; //moved here 11/21/21
+//  bool retval = true; //11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
+//
+//  buff[0] = in_char; //need to to this as %s only works with char[]
+//  //gl_pSerPort->printf("In CheckForUserInput(%s)\n",buff);
+//  if (in_char != 0)
+//  {
+//    //gl_pSerPort->printf("%lu: In CheckForUserInput() just before switch() with in_char = %c\n", (uint32_t)gl_ElapsedRunMillisec, in_char);
+//    switch (in_char)
+//    {
+//    case 0x55: //ASCII 'U'
+//    case 0x75: //ASCII 'u'
+//#pragma region FIRMWARE_UPDATE_MAIN
+//            StopBothMotors();
+//            gl_pSerPort->printf(F("Start Program Update - Send new HEX file!"));
+//      
+//            //09/20/21 copied from FlasherX - loop()
+//            if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
+//            {
+//              gl_pSerPort->printf("unable to create buffer\n"); Serial.flush();
+//      
+//              for (;;) {}
+//            }
+//      
+//            gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
+//              buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
+//              buffer_addr, buffer_addr + buffer_size);
+//      
+//            //09/20/21 clear the serial buffer
+//            while (gl_pSerPort->available())
+//            {
+//              gl_pSerPort->read();
+//            }
+//      
+//            // receive hex file via serial, write new firmware to flash, clean up, reboot
+//            //update_firmware(&Serial1, buffer_addr, buffer_size); // no return if success
+//            update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size); // no return if success
+//      
+//            // return from update_firmware() means error or user abort, so clean up and
+//            // reboot to ensure that static vars get boot-up initialized before retry
+//            gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
+//            firmware_buffer_free(buffer_addr, buffer_size);
+//            Serial1.flush();
+//            
+//
+//            REBOOT;
+//#pragma endregion FIRMWARE_UPDATE_MAIN //doesn't return
+//      break;
+//    case 0x43: //ASCII 'C'
+//    case 0x63: //ASCII 'c'
+//#pragma region COMMAND_MODE
+//      gl_pSerPort->printf("%lu: At top of COMMAND_MODE Case\n", (uint32_t)gl_ElapsedRunMillisec);
+//      gl_pSerPort->printf(F("ENTERING COMMAND MODE:\n"));
+//      gl_pSerPort->printf(F("0 = 180 deg CCW Turn\n"));
+//      gl_pSerPort->printf(F("1 = 180 deg CW Turn\n"));
+//      //gl_pSerPort->println(F("A = Back to Auto Mode"));
+//      gl_pSerPort->println(F("A = Abort - Reboots Processor"));//rev 09/27/22
+//      //gl_pSerPort->printf(F("S = Stop\n"));//c/o 05/08/23
+//      gl_pSerPort->printf(F("/ = Forward\n"));
+//      gl_pSerPort->printf(F(".(dot) = Reverse\n"));
+//      gl_pSerPort->printf(F("* = Exit ChkForUserInput()\n"));
+//      gl_pSerPort->printf(F("\n"));
+//      gl_pSerPort->printf(F("       Faster\n"));
+//      gl_pSerPort->printf(F("\t8\n"));
+//      gl_pSerPort->printf(F("Left 4\t5  6 Right\n"));
+//      gl_pSerPort->printf(F("\t2\n"));
+//      gl_pSerPort->printf(F("       Slower\n"));
+//
+//      //gl_pSerPort->printf("%lu: Just before StopBothMotors()\n", (uint32_t)gl_ElapsedRunMillisec);
+//      StopBothMotors();
+//      int speed = 0;
+//      //gl_pSerPort->printf("Just before while (gl_pSerPort->available())\n");
+//
+//      //int res = gl_pSerPort->available();
+//      //int res = Serial.available();
+//      //gl_pSerPort->printf("gl_pSerPort->available() returned %d\n", res);
+//
+//      // Prefer Serial1 (Pi5), but also accept commands from USB Serial
+//      Stream* cmdPort = nullptr;
+//
+//      if (Serial1.available() > 0) 
+//      {
+//        cmdPort = &Serial1;
+//      }
+//      else if (Serial.available() > 0) 
+//      {
+//        cmdPort = &Serial;
+//      }
+//
+//      if (cmdPort != nullptr)
+//      {
+//        while (cmdPort->available())
+//        {
+//          incomingByte = cmdPort->read();
+//          //cmdPort->printf("%lu: I removed 0X%X from serial port\n",millis(), incomingByte);
+//          //delay(200);
+//        }
+//      }
+//
+//      //gl_pSerPort->printf("Just after while (gl_pSerPort->available())\n");
+//      incomingByte = 0;
+//      bool bDone = false;//added 11/04/23 to implement user-controlled exit
+//
+//      //while (1) //09/27/22 removed bAutoMode check - now 'Aa' reboots processor
+//      while (!bDone) //09/27/22 removed bAutoMode check - now 'Aa' reboots processor
+//      {
+//        //12/25/21 now using Stream* for serial
+//        //if (gl_pSerPort->available() > 0)
+//        //{
+//        //  // read the incoming bytes:
+//        //  gl_pSerPort->readBytesUntil('\n', buff, sizeof(buff)); //08/10/26 this fills 'buff' with entire 'L/Rnn.nn' string
+//        //  incomingByte = buff[0];
+//
+//        //  // say what you got:
+//        //  gl_pSerPort->printf("I received %s\n", buff);
+//
+//        //  //clear out any remaining chars
+//        //  while (gl_pSerPort->available())
+//        //  {
+//        //    gl_pSerPort->read();
+//        //    //gl_pSerPort->printf("I removed 0X%X from Serial1\n", incomingByte);
+//        //    //gl_pSerPort->printf("%lu: I removed 0X%X from Serial1\n", (uint32_t)gl_ElapsedRunMillisec, incomingByte);
+//        //  }
+//
+//        if (cmdPort != nullptr && cmdPort->available() > 0)
+//        {
+//          // read the incoming bytes:
+//          cmdPort->readBytesUntil('\n', buff, sizeof(buff)); //08/10/26 this fills 'buff' with entire 'L/Rnn.nn' string
+//          incomingByte = buff[0];
+//
+//          // say what you got:
+//          gl_pSerPort->printf("I received %s\n", buff);
+//
+//          //clear out any remaining chars
+//          while (cmdPort != nullptr && cmdPort->available())
+//          {
+//            cmdPort->read();
+//            //gl_pSerPort->printf("I removed 0X%X from Serial1\n", incomingByte);
+//            //gl_pSerPort->printf("%lu: I removed 0X%X from Serial1\n", (uint32_t)gl_ElapsedRunMillisec, incomingByte);
+//          }
+//
+//        }
+//
+//        //08/07/26 added to allow Pi5 to inject characters
+//        //else if (Serial1.available() > 0)
+//        if (cmdPort != nullptr && cmdPort->available() > 0)
+//        {
+//          // read the incoming bytes:
+//          cmdPort->readBytesUntil('\n', buff, sizeof(buff));//08/10/26 this fills 'buff' with entire 'L/Rnn.nn' string
+//          incomingByte = buff[0];
+//
+//          // say what you got:
+//          gl_pSerPort->printf("I received %s on serial port\n", buff);
+//
+//          //clear out any remaining chars
+//          //while (Serial1.available())
+//          //{
+//          //  Serial1.read();
+//          //}
+//
+//          while (cmdPort != nullptr && cmdPort->available())
+//          {
+//            cmdPort->read();
+//          }
+//        }
+//
+//
+//        //11/21/21 incomingByte can come from either serial input
+//        if (incomingByte != 0)
+//        {
+//          //gl_pSerPort->printf("%lu: Top of Switch Statement\n", (uint32_t)gl_ElapsedRunMillisec);
+//          switch (incomingByte)
+//          {
+//            //08/09/26 added 'L' & 'R' commands for arbitrary SpinTurn amounts
+//            //08/10/26 at this point 'buff' holds entire 'L/Rnn.nn' string
+//          case 'L':   // or case 0x4C
+//          case 'R':
+//          {
+//            gl_pSerPort->printf(F("In R/L Case with incomingByte = %c\n"), incomingByte);
+//
+//            // If you are switching on a variable named `incomingByte`then
+//            bool b_ccw = (incomingByte == 'L');
+//
+//            char numBuf[16] = {}; //this will hold 'L/R' string minus the 'L' or 'R'
+//            //strncpy(numBuf, &buff[1], strlen(buff) - 1);
+//            strncpy(numBuf, &buff[1], 5);
+//            numBuf[5] = '\n';
+//
+//            gl_pSerPort->printf(F("In R/L Case with b_ccw = %s numBuf = %s\n"), b_ccw? "CW":"CCW", numBuf);
+//
+//            float degrees = 0.0f;
+//            float rate = DEFAULT_TURN_RATE_DEGPERSEC;   //default is 30 deg/s 
+//
+//            // Parse "30.55" or "30.55,45"
+//            int parsed = sscanf(numBuf, "%f,%f", &degrees, &rate);
+//
+//            if (parsed >= 1 && degrees > 0.05f && degrees <= 360.0f)
+//            {
+//              gl_pSerPort->printf(F("%s %.2f deg @ %.1f deg/s\n"),
+//                b_ccw ? "CCW" : "CW", degrees, rate);
+//
+//              SpinTurn(b_ccw, degrees, rate);
+//
+//              if (gl_bIsForwardDir)
+//                MoveAhead(speed, speed);
+//              else
+//                MoveReverse(speed, speed);
+//            }
+//            else
+//            {
+//              gl_pSerPort->printf(F("Bad turn argument: '%s'\n"), buff);
+//            }
+//          }
+//          break;
+//          case 0x30: //Dec '0'
+//            gl_pSerPort->printf(F("CCW 180 deg Turn\n"));
+//            SpinTurn(true, 180, 90);
+//            MoveAhead(speed, speed);
+//            break;
+//          case 0x31: //Dec '1'
+//            gl_pSerPort->printf(F("CW 180 deg Turn\n"));
+//            SpinTurn(false, 180, 45);
+//            break;
+//          case 0x34: //Turn left 10 deg and keep moving
+//            //gl_pSerPort->printf("%lu: In CCW 10 deg turn block\n", (uint32_t)gl_ElapsedRunMillisec);
+//            gl_pSerPort->printf(F("CCW 10 deg Turn\n"));
+//            SpinTurn(true, 10, 30);
+//
+//            if (gl_bIsForwardDir)
+//            {
+//              MoveAhead(speed, speed);
+//            }
+//            else
+//            {
+//              MoveReverse(speed, speed);
+//            }
+//            break;
+//          case 0x36: //Turn right 10 deg and keep moving
+//            //gl_pSerPort->print("CW 10 deg Turn\n");
+//            gl_pSerPort->printf(F("CW 10 deg Turn\n"));
+//            SpinTurn(false, 10, 30);
+//
+//            //added 05/03/20
+//            if (gl_bIsForwardDir)
+//            {
+//              MoveAhead(speed, speed);
+//            }
+//            else
+//            {
+//              MoveReverse(speed, speed);
+//            }
+//            break;
+//          case 0x38: //Speed up 
+//            speed += 50;
+//            speed = (speed >= MOTOR_SPEED_MAX) ? MOTOR_SPEED_MAX : speed;
+//            //gl_pSerPort->printf("Speeding up: speed now %d\n", speed);
+//            if (gl_bIsForwardDir)
+//            {
+//              MoveAhead(speed, speed);
+//            }
+//            else
+//            {
+//              MoveReverse(speed, speed);
+//            }
+//            break;
+//          case 0x32: //Slow down 
+//            speed -= 50;
+//            speed = (speed < 0) ? 0 : speed;
+//            //gl_pSerPort->printf("Slowing down: speed now %d\n", speed);
+//            if (gl_bIsForwardDir)
+//            { 
+//              MoveAhead(speed, speed);
+//            }
+//            else
+//            {
+//              MoveReverse(speed, speed);
+//            }
+//            break;
+//          case 0x35: //05/07/20 changed to use '5' vs 'S'
+//            //gl_pSerPort->println(F("Stopping Motors!"));
+//            StopBothMotors();
+//            speed = 0;
+//            break;
+//            //case 0x41: //ASCII 'A'
+//            //case 0x61: //ASCII 'a'
+//            //  StopBothMotors();
+//
+//            //  //09/27/22 rev to execute soft reboot
+//            //  gl_pSerPort->printf(F("Received 'A' or 'a' - Rebooting in 1 second...\n"));
+//            //  delay(1000);
+//            //  REBOOT;
+//            //  break;
+//          case 0x2E: //ASCII '.' (dot)
+//            gl_pSerPort->printf(F("Setting both motors to reverse\n"));
+//            gl_bIsForwardDir = false;
+//            MoveReverse(speed, speed);
+//            break;
+//            //case 0x46: //ASCII 'F'
+//            //case 0x66: //ASCII 'f'
+//          case 0x2F: //ASCII '/'
+//            gl_pSerPort->printf(F("Setting both motors to forward\n"));
+//            gl_bIsForwardDir = true;
+//            MoveAhead(speed, speed);
+//#pragma endregion COMMAND_MODE //only returns for 'a' (auto) input
+//            break;
+//
+//            //01/11/22 copied here from main switch statement to allow firmware updates
+//            //even when in 'command' mode
+//          case 0x55: //ASCII 'U'
+//          case 0x75: //ASCII 'u'
+//#pragma region FIRMWARE UPDATE
+//            StopBothMotors();
+//            gl_pSerPort->printf(F("Start Program Update - Send new HEX file!\n"));
+//
+//            //09/20/21 copied from FlasherX - loop()
+//            if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
+//            {
+//              gl_pSerPort->printf("unable to create buffer\n"); Serial.flush();
+//
+//              for (;;) {}
+//            }
+//
+//            gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
+//              buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
+//              buffer_addr, buffer_addr + buffer_size);
+//
+//            //09/20/21 clear the serial buffer
+//            while (gl_pSerPort->available())
+//            {
+//              gl_pSerPort->read();
+//            }
+//
+//            // receive hex file via serial, write new firmware to flash, clean up, reboot
+//            //update_firmware(&Serial1, buffer_addr, buffer_size); // no return if success
+//            update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size); // no return if success
+//
+//
+//            // return from update_firmware() means error or user abort, so clean up and
+//            // reboot to ensure that static vars get boot-up initialized before retry
+//            gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
+//            firmware_buffer_free(buffer_addr, buffer_size);
+//            Serial1.flush();
+//            REBOOT;
+//#pragma endregion FIRMWARE UPDATE  //doesn't return
+//            break;
+//          case 0x2A: //ASCII '*' //11/04/23 added to force FALSE return
+//            gl_pSerPort->printf(F("Exiting ChkForUserInput()\n"));
+//            StopBothMotors();
+//            bDone = true;
+//            retval = false;
+//            break;
+//          default:
+//            gl_pSerPort->printf(F("In Default Case: Stopping Motors!\n"));
+//            StopBothMotors();
+//          }
+//          incomingByte = 0;
+//        }
+//      }
+//      gl_pSerPort->printf(F("Exited  'while (!bDone)'\n"));
+//    }
+//  }
+//  //gl_pSerPort->printf("Returning from 'CheckForUserInput()' with retval = %s\n", retval? "TRUE" : "FALSE");
+//  return retval;
+//}
+bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
 {
-  //Purpose: Check for user override
-  //Inputs: in_char = char object representing user override input
-  //Outputs: override actions taken.  Returns if 'auto' mode selected
-  //Notes:
-  //  09/19/22 copied from CheckUserInput() and modified to accept char argument 
+  // Purpose: Check for user override
+  // Inputs:  in_char = char object representing user override input
+  // Outputs: override actions taken. Returns false if '*' was used to exit.
+  // Notes:
+  //  09/19/22 copied from CheckUserInput() and modified to accept char argument
   //  09/28/22 'Aa' now causes a processor reboot
   //  11/04/23 '*' now causes fcn to return FALSE
+  //  08/09/26 bumped bufflen to accommodate new 'Lnn.nn' and 'Rnn.nn' SpinTurn() commands
 
-  //08/09/26 bumped bufflen to accomodate new 'Lnn.nn' and 'Rnn.nn' SpinTurn() commands
-  //const int bufflen = 3;
   const int bufflen = 10;
   char buff[bufflen];
   memset(buff, 0, bufflen);
-  byte incomingByte = 0; //moved here 11/21/21
-  bool retval = true; //11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
 
-  buff[0] = in_char; //need to to this as %s only works with char[]
-  //gl_pSerPort->printf("In CheckForUserInput(%s)\n",buff);
+  byte incomingByte = 0;
+  bool retval = true;
+
+  buff[0] = in_char;
+
   if (in_char != 0)
   {
-    //gl_pSerPort->printf("%lu: In CheckForUserInput() just before switch() with in_char = %c\n", (uint32_t)gl_ElapsedRunMillisec, in_char);
     switch (in_char)
     {
-    case 0x55: //ASCII 'U'
-    case 0x75: //ASCII 'u'
+      //---------------------------------------------------------------------
+      // Firmware Update
+      //---------------------------------------------------------------------
+    case 0x55: // 'U'
+    case 0x75: // 'u'
 #pragma region FIRMWARE_UPDATE_MAIN
-            StopBothMotors();
-            gl_pSerPort->printf(F("Start Program Update - Send new HEX file!"));
-      
-            //09/20/21 copied from FlasherX - loop()
-            if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
-            {
-              gl_pSerPort->printf("unable to create buffer\n"); Serial.flush();
-      
-              for (;;) {}
-            }
-      
-            gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
-              buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
-              buffer_addr, buffer_addr + buffer_size);
-      
-            //09/20/21 clear the serial buffer
-            while (gl_pSerPort->available())
-            {
-              gl_pSerPort->read();
-            }
-      
-            // receive hex file via serial, write new firmware to flash, clean up, reboot
-            //update_firmware(&Serial1, buffer_addr, buffer_size); // no return if success
-            update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size); // no return if success
-      
-            // return from update_firmware() means error or user abort, so clean up and
-            // reboot to ensure that static vars get boot-up initialized before retry
-            gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
-            firmware_buffer_free(buffer_addr, buffer_size);
-            Serial1.flush();
-            REBOOT;
-#pragma endregion FIRMWARE_UPDATE_MAIN //doesn't return
+      StopBothMotors();
+      gl_pSerPort->printf(F("Start Program Update - Send new HEX file!\n"));
+
+      if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
+      {
+        gl_pSerPort->printf("unable to create buffer\n");
+        Serial.flush();
+        for (;;) {}
+      }
+
+      gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
+        buffer_size / 1024,
+        IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
+        buffer_addr, buffer_addr + buffer_size);
+
+      // Clear any pending serial data
+      while (Serial.available())  Serial.read();
+      while (Serial1.available()) Serial1.read();
+
+      // Receive hex file (no return on success)
+      update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size);
+
+      // If we get here → error or user abort
+      gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
+      firmware_buffer_free(buffer_addr, buffer_size);
+      Serial1.flush();
+      REBOOT;
+#pragma endregion FIRMWARE_UPDATE_MAIN
       break;
-    case 0x43: //ASCII 'C'
-    case 0x63: //ASCII 'c'
+
+      //---------------------------------------------------------------------
+      // Interactive Command Mode
+      //---------------------------------------------------------------------
+    case 0x43: // 'C'
+    case 0x63: // 'c'
 #pragma region COMMAND_MODE
+    {//needed to avoid "crosses initialization of int speed" compiler error
       gl_pSerPort->printf("%lu: At top of COMMAND_MODE Case\n", (uint32_t)gl_ElapsedRunMillisec);
       gl_pSerPort->printf(F("ENTERING COMMAND MODE:\n"));
       gl_pSerPort->printf(F("0 = 180 deg CCW Turn\n"));
       gl_pSerPort->printf(F("1 = 180 deg CW Turn\n"));
-      //gl_pSerPort->println(F("A = Back to Auto Mode"));
-      gl_pSerPort->println(F("A = Abort - Reboots Processor"));//rev 09/27/22
-      //gl_pSerPort->printf(F("S = Stop\n"));//c/o 05/08/23
+      gl_pSerPort->println(F("A = Abort - Reboots Processor"));
       gl_pSerPort->printf(F("/ = Forward\n"));
       gl_pSerPort->printf(F(".(dot) = Reverse\n"));
       gl_pSerPort->printf(F("* = Exit ChkForUserInput()\n"));
       gl_pSerPort->printf(F("\n"));
-      gl_pSerPort->printf(F("       Faster\n"));
+      gl_pSerPort->printf(F(" Faster\n"));
       gl_pSerPort->printf(F("\t8\n"));
-      gl_pSerPort->printf(F("Left 4\t5  6 Right\n"));
+      gl_pSerPort->printf(F("Left 4\t5 6 Right\n"));
       gl_pSerPort->printf(F("\t2\n"));
-      gl_pSerPort->printf(F("       Slower\n"));
+      gl_pSerPort->printf(F(" Slower\n"));
+      gl_pSerPort->printf(F("Lxx.x or Rxx.x = SpinTurn xx.x degrees\n"));
+      gl_pSerPort->printf(F("Lxx.x,yy or Rxx.x,yy = SpinTurn with custom rate\n"));
 
-      //gl_pSerPort->printf("%lu: Just before StopBothMotors()\n", (uint32_t)gl_ElapsedRunMillisec);
       StopBothMotors();
       int speed = 0;
-      //bool bAutoMode = false;
-      //gl_pSerPort->printf("Just before while (gl_pSerPort->available())\n");
 
-      //int res = gl_pSerPort->available();
-      //int res = Serial.available();
-      //gl_pSerPort->printf("gl_pSerPort->available() returned %d\n", res);
+      // Flush any leftover characters on both ports
+      while (Serial.available())  Serial.read();
+      while (Serial1.available()) Serial1.read();
 
-
-      while (gl_pSerPort->available())
-      {
-        incomingByte = gl_pSerPort->read();
-        //gl_pSerPort->printf("%lu: I removed 0X%X from Serial1\n",millis(), incomingByte);
-        //delay(200);
-      }
-
-      //gl_pSerPort->printf("Just after while (gl_pSerPort->available())\n");
       incomingByte = 0;
-      bool bDone = false;//added 11/04/23 to implement user-controlled exit
+      bool bDone = false;
 
-      //while (1) //09/27/22 removed bAutoMode check - now 'Aa' reboots processor
-      while (!bDone) //09/27/22 removed bAutoMode check - now 'Aa' reboots processor
+      while (!bDone)
       {
-        //12/25/21 now using Stream* for serial
-        if (gl_pSerPort->available() > 0)
+        // Re-evaluate which port has data every pass (prefer Serial1 / Pi5)
+        Stream* cmdPort = nullptr;
+
+        if (Serial1.available() > 0)
         {
-          // read the incoming bytes:
-          gl_pSerPort->readBytesUntil('\n', buff, sizeof(buff)); //08/10/26 this fills 'buff' with entire 'L/Rnn.nn' string
+          cmdPort = &Serial1;
+        }
+        else if (Serial.available() > 0)
+        {
+          cmdPort = &Serial;
+        }
+
+        if (cmdPort != nullptr)
+        {
+          memset(buff, 0, sizeof(buff));
+          cmdPort->readBytesUntil('\n', buff, sizeof(buff) - 1);
           incomingByte = buff[0];
 
-          // say what you got:
-          gl_pSerPort->printf("I received %s\n", buff);
+          gl_pSerPort->printf("I received '%s'\n", buff);
 
-          //clear out any remaining chars
-          while (gl_pSerPort->available())
+          // Drain any remaining characters on the same port
+          while (cmdPort->available())
           {
-            gl_pSerPort->read();
-            //gl_pSerPort->printf("I removed 0X%X from Serial1\n", incomingByte);
-            //gl_pSerPort->printf("%lu: I removed 0X%X from Serial1\n", (uint32_t)gl_ElapsedRunMillisec, incomingByte);
+            cmdPort->read();
           }
         }
 
-        //08/07/26 added to allow Pi5 to inject characters
-        else if (Serial1.available() > 0)
-        {
-          // read the incoming bytes:
-          Serial1.readBytesUntil('\n', buff, sizeof(buff));//08/10/26 this fills 'buff' with entire 'L/Rnn.nn' string
-          incomingByte = buff[0];
-
-          // say what you got:
-          Serial.printf("I received %s on Serial1\n", buff);
-
-          //clear out any remaining chars
-          while (Serial1.available())
-          {
-            Serial1.read();
-          }
-        }
-
-
-        //11/21/21 incomingByte can come from either serial input
         if (incomingByte != 0)
         {
-          //gl_pSerPort->printf("%lu: Top of Switch Statement\n", (uint32_t)gl_ElapsedRunMillisec);
           switch (incomingByte)
           {
-            //08/09/26 added 'L' & 'R' commands for arbitrary SpinTurn amounts
-            //08/10/26 at this point 'buff' holds entire 'L/Rnn.nn' string
-          case 'L':   // or case 0x4C
+            //-------------------------------------------------
+            // Arbitrary angle turns: L30, R45.5, L90,30 etc.
+            //-------------------------------------------------
+          case 'L':
           case 'R':
           {
-            gl_pSerPort->printf(F("In R/L Case with incomingByte = %c\n"), incomingByte);
-
-            // If you are switching on a variable named `incomingByte`then
             bool b_ccw = (incomingByte == 'L');
+            char numBuf[16] = { 0 };
 
-            char numBuf[16] = {}; //this will hold 'L/R' string minus the 'L' or 'R'
-            //strncpy(numBuf, &buff[1], strlen(buff) - 1);
-            strncpy(numBuf, &buff[1], 5);
-            numBuf[5] = '\n';
-
-            gl_pSerPort->printf(F("In R/L Case with b_ccw = %s numBuf = %s\n"), b_ccw? "CW":"CCW", numBuf);
+            // Copy everything after the L/R
+            strncpy(numBuf, &buff[1], sizeof(numBuf) - 1);
 
             float degrees = 0.0f;
-            float rate = DEFAULT_TURN_RATE_DEGPERSEC;   //default is 30 deg/s 
+            float rate = DEFAULT_TURN_RATE_DEGPERSEC;
 
-            // Parse "30.55" or "30.55,45"
             int parsed = sscanf(numBuf, "%f,%f", &degrees, &rate);
 
             if (parsed >= 1 && degrees > 0.05f && degrees <= 360.0f)
@@ -2999,9 +3021,13 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
               SpinTurn(b_ccw, degrees, rate);
 
               if (gl_bIsForwardDir)
+              {
                 MoveAhead(speed, speed);
+              }
               else
+              {
                 MoveReverse(speed, speed);
+              }
             }
             else
             {
@@ -3009,20 +3035,42 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
             }
           }
           break;
-          case 0x30: //Dec '0'
+
+          //-------------------------------------------------
+          // Fixed 180° turns
+          //-------------------------------------------------
+          case '0':
             gl_pSerPort->printf(F("CCW 180 deg Turn\n"));
             SpinTurn(true, 180, 90);
-            MoveAhead(speed, speed);
+            if (gl_bIsForwardDir)
+            {
+              MoveAhead(speed, speed);
+            }
+            else
+            {
+              MoveReverse(speed, speed);
+            }
             break;
-          case 0x31: //Dec '1'
+
+          case '1':
             gl_pSerPort->printf(F("CW 180 deg Turn\n"));
             SpinTurn(false, 180, 45);
+            if (gl_bIsForwardDir)
+            {
+              MoveAhead(speed, speed);
+            }
+            else
+            {
+              MoveReverse(speed, speed);
+            }
             break;
-          case 0x34: //Turn left 10 deg and keep moving
-            //gl_pSerPort->printf("%lu: In CCW 10 deg turn block\n", (uint32_t)gl_ElapsedRunMillisec);
+
+            //-------------------------------------------------
+            // 10° nudge turns
+            //-------------------------------------------------
+          case '4':   // Left / CCW
             gl_pSerPort->printf(F("CCW 10 deg Turn\n"));
             SpinTurn(true, 10, 30);
-
             if (gl_bIsForwardDir)
             {
               MoveAhead(speed, speed);
@@ -3032,25 +3080,30 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
               MoveReverse(speed, speed);
             }
             break;
-          case 0x36: //Turn right 10 deg and keep moving
-            //gl_pSerPort->print("CW 10 deg Turn\n");
+
+          case '6':   // Right / CW
             gl_pSerPort->printf(F("CW 10 deg Turn\n"));
             SpinTurn(false, 10, 30);
+            if (gl_bIsForwardDir)
+            {
+              MoveAhead(speed, speed);
+            }
+            else
+            {
+              MoveReverse(speed, speed);
+            }
+            break;
 
-            //added 05/03/20
-            if (gl_bIsForwardDir)
-            {
-              MoveAhead(speed, speed);
-            }
-            else
-            {
-              MoveReverse(speed, speed);
-            }
-            break;
-          case 0x38: //Speed up 
+            //-------------------------------------------------
+            // Speed control
+            //-------------------------------------------------
+          case '8':   // Faster
             speed += 50;
-            speed = (speed >= MOTOR_SPEED_MAX) ? MOTOR_SPEED_MAX : speed;
-            //gl_pSerPort->printf("Speeding up: speed now %d\n", speed);
+            if (speed > MOTOR_SPEED_MAX)
+            {
+              speed = MOTOR_SPEED_MAX;
+            }
+            gl_pSerPort->printf(F("Speed now %d\n"), speed);
             if (gl_bIsForwardDir)
             {
               MoveAhead(speed, speed);
@@ -3060,10 +3113,14 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
               MoveReverse(speed, speed);
             }
             break;
-          case 0x32: //Slow down 
+
+          case '2':   // Slower
             speed -= 50;
-            speed = (speed < 0) ? 0 : speed;
-            //gl_pSerPort->printf("Slowing down: speed now %d\n", speed);
+            if (speed < 0)
+            {
+              speed = 0;
+            }
+            gl_pSerPort->printf(F("Speed now %d\n"), speed);
             if (gl_bIsForwardDir)
             {
               MoveAhead(speed, speed);
@@ -3073,203 +3130,104 @@ bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use 
               MoveReverse(speed, speed);
             }
             break;
-          case 0x35: //05/07/20 changed to use '5' vs 'S'
-            //gl_pSerPort->println(F("Stopping Motors!"));
+
+          case '5':   // Stop
+            gl_pSerPort->printf(F("Stopping Motors\n"));
             StopBothMotors();
             speed = 0;
             break;
-            //case 0x41: //ASCII 'A'
-            //case 0x61: //ASCII 'a'
-            //  StopBothMotors();
 
-            //  //09/27/22 rev to execute soft reboot
-            //  gl_pSerPort->printf(F("Received 'A' or 'a' - Rebooting in 1 second...\n"));
-            //  delay(1000);
-            //  REBOOT;
-            //  break;
-          case 0x2E: //ASCII '.' (dot)
+            //-------------------------------------------------
+            // Direction
+            //-------------------------------------------------
+          case '.':   // Reverse
             gl_pSerPort->printf(F("Setting both motors to reverse\n"));
             gl_bIsForwardDir = false;
             MoveReverse(speed, speed);
             break;
-            //case 0x46: //ASCII 'F'
-            //case 0x66: //ASCII 'f'
-          case 0x2F: //ASCII '/'
+
+          case '/':   // Forward
             gl_pSerPort->printf(F("Setting both motors to forward\n"));
             gl_bIsForwardDir = true;
             MoveAhead(speed, speed);
-#pragma endregion COMMAND_MODE //only returns for 'a' (auto) input
             break;
 
-            //01/11/22 copied here from main switch statement to allow firmware updates
-            //even when in 'command' mode
-          case 0x55: //ASCII 'U'
-          case 0x75: //ASCII 'u'
+            //-------------------------------------------------
+            // Firmware update while already in command mode
+            //-------------------------------------------------
+          case 'U':
+          case 'u':
 #pragma region FIRMWARE UPDATE
             StopBothMotors();
             gl_pSerPort->printf(F("Start Program Update - Send new HEX file!\n"));
 
-            //09/20/21 copied from FlasherX - loop()
             if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
             {
-              gl_pSerPort->printf("unable to create buffer\n"); Serial.flush();
-
+              gl_pSerPort->printf("unable to create buffer\n");
+              Serial.flush();
               for (;;) {}
             }
 
             gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
-              buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
+              buffer_size / 1024,
+              IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
               buffer_addr, buffer_addr + buffer_size);
 
-            //09/20/21 clear the serial buffer
-            while (gl_pSerPort->available())
-            {
-              gl_pSerPort->read();
-            }
+            while (Serial.available())  Serial.read();
+            while (Serial1.available()) Serial1.read();
 
-            // receive hex file via serial, write new firmware to flash, clean up, reboot
-            //update_firmware(&Serial1, buffer_addr, buffer_size); // no return if success
-            update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size); // no return if success
+            update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size);
 
-
-            // return from update_firmware() means error or user abort, so clean up and
-            // reboot to ensure that static vars get boot-up initialized before retry
             gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
             firmware_buffer_free(buffer_addr, buffer_size);
             Serial1.flush();
             REBOOT;
-#pragma endregion FIRMWARE UPDATE  //doesn't return
+#pragma endregion FIRMWARE UPDATE
             break;
-          case 0x2A: //ASCII '*' //11/04/23 added to force FALSE return
+
+            //-------------------------------------------------
+            // Exit command mode
+            //-------------------------------------------------
+          case '*':
             gl_pSerPort->printf(F("Exiting ChkForUserInput()\n"));
             StopBothMotors();
             bDone = true;
             retval = false;
             break;
+
+          case 'A':
+          case 'a':
+            gl_pSerPort->printf(F("Received 'A'/'a' - Rebooting in 1 second...\n"));
+            delay(1000);
+            REBOOT;
+            break;
+
           default:
-            gl_pSerPort->printf(F("In Default Case: Stopping Motors!\n"));
+            gl_pSerPort->printf(F("Unknown command: '%c' - Stopping Motors\n"), incomingByte);
             StopBothMotors();
-          }
+            break;
+          } // end inner switch
+
+          // Critical: clear so the same command is not repeated
           incomingByte = 0;
-        }
-      }
-      gl_pSerPort->printf(F("Exited  'while (!bDone)'\n"));
-    }
-  }
-  //gl_pSerPort->printf("Returning from 'CheckForUserInput()' with retval = %s\n", retval? "TRUE" : "FALSE");
+        } // end if (incomingByte != 0)
+      } // end while (!bDone)
+
+      gl_pSerPort->printf(F("Exited 'while (!bDone)'\n"));
+#pragma endregion COMMAND_MODE
+    }//needed to avoid "crosses initialization of int speed" compiler error
+      break;
+
+    default:
+      // Unknown top-level character – ignore
+      break;
+    } // end outer switch
+  } // end if (in_char != 0)
+
   return retval;
 }
+#pragma endregion OTA & DIRECT MOTOR CONTROL
 
-void EnableAllRearLEDs(bool bEnable)
-{
-  //Purpose:  Turns all 4 LEDs ON or OFF (LOW is ON)
-  //Provenance: Created 05/02/17 gfp
-
-  if (bEnable)
-  {
-    //gl_pSerPort->printf("EnableAllRearLEDs(TRUE) - setting all LED lines LOW\n");
-    digitalWrite(CHG_CONNECT_LED_PIN, LOW);
-    digitalWrite(_20PCT_LED_PIN, LOW);
-    digitalWrite(_40PCT_LED_PIN, LOW);
-    digitalWrite(_60PCT_LED_PIN, LOW);
-    digitalWrite(_80PCT_LED_PIN, LOW);
-    digitalWrite(CHG_FIN_LED_PIN, LOW);
-  }
-  else
-  {
-    //gl_pSerPort->printf("EnableAllRearLEDs(FALSE) - setting all LED lines HIGH\n");
-    digitalWrite(CHG_CONNECT_LED_PIN, HIGH);
-    digitalWrite(_20PCT_LED_PIN, HIGH);
-    digitalWrite(_40PCT_LED_PIN, HIGH);
-    digitalWrite(_60PCT_LED_PIN, HIGH);
-    digitalWrite(_80PCT_LED_PIN, HIGH);
-    digitalWrite(CHG_FIN_LED_PIN, HIGH);
-  }
-}
-//
-//void YellForHelp()
-//{
-//  //Purpose: last-ditch effort to preserve the battery.  All non-essential loads are shut down
-//  //		   and an visual/audible SOS is sounded forever
-//  //Inputs: Call from OpMode case switch when GetBattVoltage() returns a below-threshold value
-//  //Outputs: 
-//  //	All wheel motors stopped
-//  //	All rear panel LED's turned OFF
-//  //	PWM 'SOS' tones on SOS_PWM_PIN
-//  //Plan:
-//  //	Step1: Turn off wheel motors
-//  //	Step2: Turn off all rear panel LEDs
-//  //	Step3: Send SOS to speaker, the purple rear panel LEDs, and the red laser
-//  //Notes:
-//  //	01/16/18 - SOS tone code copied from PWMTest.pde
-//
-////Step1: Turn off wheel motors
-//  StopBothMotors();
-//
-//  //Step2: Turn off all rear panel LEDs
-//  EnableAllRearLEDs(false);
-//
-//  //Step3: infinte loop to xmit SOS on speaker and the purple rear panel LEDs
-//  while (!gl_bChgConnect)//12/16/20 rev to use ISR-generated value
-//  {
-//    uint16_t DOT_MS = 200;
-//    uint16_t DASH_MS = 800;
-//    uint16_t HIGHTONE = 1000;
-//
-//
-//    //Send 'S'
-//    for (size_t i = 0; i < 3; i++)
-//    {
-//      digitalWrite(RED_LASER_DIODE_PIN, HIGH); //turn laser on
-//      digitalWrite(CHG_FIN_LED_PIN, LOW); //turn LED on
-//      digitalWrite(CHG_CONNECT_LED_PIN, LOW); //turn LED on
-//      tone(SOS_PWM_PIN, HIGHTONE, DOT_MS); //returns immediately
-//      delay(DOT_MS);              //delay for LED viewing
-//      digitalWrite(CHG_FIN_LED_PIN, HIGH); //turn LED off
-//      digitalWrite(CHG_CONNECT_LED_PIN, HIGH); //turn LED off
-//      digitalWrite(RED_LASER_DIODE_PIN, LOW); //turn laser off
-//      delay(DOT_MS);              //inter-symbol spacing
-//    }
-//    delay(DOT_MS); //inter-letter spacing
-//
-//    //Send 'O'
-//    for (size_t i = 0; i < 3; i++)
-//    {
-//      digitalWrite(RED_LASER_DIODE_PIN, HIGH); //turn laser on
-//      digitalWrite(CHG_FIN_LED_PIN, LOW); //turn LED on
-//      digitalWrite(CHG_CONNECT_LED_PIN, LOW); //turn LED on
-//      tone(SOS_PWM_PIN, HIGHTONE, DASH_MS); //returns immediately
-//      delay(DASH_MS);              //delay for LED viewing
-//      digitalWrite(CHG_FIN_LED_PIN, HIGH); //turn LED off
-//      digitalWrite(CHG_CONNECT_LED_PIN, HIGH); //turn LED off
-//      digitalWrite(RED_LASER_DIODE_PIN, LOW); //turn laser off
-//      delay(DOT_MS);              //inter-symbol spacing
-//    }
-//    delay(DOT_MS); //inter-letter spacing
-//
-//    //Send 'S'
-//    for (size_t i = 0; i < 3; i++)
-//    {
-//      digitalWrite(RED_LASER_DIODE_PIN, HIGH); //turn laser on
-//      digitalWrite(CHG_FIN_LED_PIN, LOW); //turn LED on
-//      digitalWrite(CHG_CONNECT_LED_PIN, LOW); //turn LED on
-//      tone(SOS_PWM_PIN, HIGHTONE, DOT_MS); //returns immediately
-//      delay(DOT_MS);              //delay for LED viewing
-//      digitalWrite(CHG_FIN_LED_PIN, HIGH); //turn LED off
-//      digitalWrite(CHG_CONNECT_LED_PIN, HIGH); //turn LED off
-//      digitalWrite(RED_LASER_DIODE_PIN, LOW); //turn laser off
-//      delay(DOT_MS);              //inter-symbol spacing
-//    }
-//
-//    delay(10 * DOT_MS);         // inter-message spacing
-//
-//    //UpdateAllEnvironmentParameters(); //06/12/22 added to update gl_bChgConnect
-//    //CheckForUserInput(); //added 06/14/22
-//  }
-//}
-//
-//#pragma endregion MISCELLANEOUS
-//
 #pragma region HDG_BASED_TURN_SUPPORT
 bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-rate arg (default = TURN_RATE_TARGET_DEGPERSEC)
 {
@@ -3303,9 +3261,13 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
 
   numDeg = abs(numDeg);//  03/22/22 added to ensure numDeg >= 0
   //DEBUG!!
+  //gl_pSerPort->printf("In SpinTurn(%s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
+  //  b_ccw == TURNDIR_CCW ? "CCW" : "CW", numDeg, degPersec,
+  //  TurnRate_Kp, TurnRate_Ki, TurnRate_Kd);
   gl_pSerPort->printf("In SpinTurn(%s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
     b_ccw == TURNDIR_CCW ? "CCW" : "CW", numDeg, degPersec,
     TurnRate_Kp, TurnRate_Ki, TurnRate_Kd);
+
   //DEBUG!!
 
   //no need to continue if the IMU isn't available
@@ -3435,8 +3397,6 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
       speed = (TurnRatePIDOutput > MOTOR_SPEED_HALF) ? MOTOR_SPEED_HALF : (int)TurnRatePIDOutput;
       speed = (TurnRatePIDOutput <= MOTOR_SPEED_OFF) ? MOTOR_SPEED_OFF : (int)TurnRatePIDOutput;
 
-      //05/06/22 speed val always >= 0 here. 
-      //05/06/22 using SetLeft/RightMotorDirAndSpeed() simpler than using RunBothMotorsBidirectional().
       SetLeftMotorDirAndSpeed(!b_ccw, speed);
       SetRightMotorDirAndSpeed(b_ccw, speed);
 
@@ -3735,332 +3695,332 @@ uint8_t GetCurrentFIFOPacket(uint8_t* data, uint8_t length, uint16_t max_loops)
   return 1;
 }
 
-bool RollingTurn(bool b_ccw, bool b_fwd, float numDeg, float Kp, float Ki, float Kd, float degPersec) //04/25/21 added turn-rate arg (default = TURN_RATE_TARGET_DEGPERSEC)
-{
-  //Purpose: Make a numDeg CW or CCW 'rolling' turn
-  //Inputs:
-  //	b_ccw - True if turn is to be ccw, false otherwise
-  //	numDeg - angle to be swept out in the turn
-  //	ROLLING_TURN_MAX_SEC_PER_DEG = const used to generate timeout proportional to turn deg
-  //	IMUHdgValDeg = IMU heading value updated by UpdateIMUHdgValDeg() //11/02/20 now updated in ISR
-  //	degPerSec = float value denoting desired turn rate
-  //  Kp, Ki, Kd = PID parameters
-  //Plan:
-  //	Step1: Get current heading as starting point
-  //	Step2: Disable TIMER5 interrupts
-  //	Step3: Compute new target value & timeout value
-  //	Step4: Run motors until target reached, using inline PID algorithm to control turn rate
-  //	Step5: Re-enable TIMER5 interrupts
-  //Notes:
-  //	06/06/21 we-written to remove PID library - now uses custom 'PIDCalcs()' function
-  //	06/06/21 added re-try for 180.00 return from IMU - could be bad value
-  //	06/11/21 added code to correct dHdg errors due to 179/-179 transition & bad IMU values
-  //	06/12/21 cleaned up & commented out debug code
-  //	11/14/21 removed 'first time skip' block; added motor start before entering loop
-  //  03/22/22 added code to ensure numDeg >= 0
-  //  06/01/22 now using MOTOR_SPEED_HALF for max motor speed and MOTOR_SPEED_OFF for low end
-  //  12/03/22 copied from 'SpinTurn()' and adapted for 'rolling turn' algorithm
-  //  12/05/22 added 'isFwd' to signature, and added code to support backwards rolling turns
-  //  02/03/23 copied here from WallE3_RollingTurn_V1
-
-  float tgt_deg;
-  float timeout_sec;
-  bool bDoneTurning = false;
-  bool bTimedOut = false;
-  bool bResult = true; //04/21/20 added so will be only one exit point
-
-  numDeg = abs(numDeg);//  03/22/22 added to ensure numDeg >= 0
-  //DEBUG!!
-  //gl_pSerPort->printf("In RollingTurn(%s, %s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
-  //  b_ccw == TURNDIR_CCW ? "CCW" : "CW", b_fwd == FWD_DIR ? "FWD" : "REV", numDeg, degPersec,
-  //  Kp, Ki, Kd);
-  //DEBUG!!
-
-  //no need to continue if the IMU isn't available
-  if (!dmpReady)
-  {
-    Serial.printf("DMP Failure - returning FALSE\n");
-    return false;
-  }
-
-  //Step1: Get current heading as starting point
-    //06/06/21 it is possible for IMU to return 180.00 on failure
-    //so try again.  If it really IS 180, then 
-    //it will eventually time out and go on
-
-  //08/26/21 re-wrote using 3-value array to make sure initial heading is a steady value
-  UpdateIMUHdgValDeg();
-
-  int retries = 0;
-  if ((IMUHdgValDeg == 180.f || IMUHdgValDeg == 0.f) && retries < 5)
-  {
-    //DEBUG!!
-    //gl_pSerPort->printf("Got 180.00 or 0.00 exactly (%2.3f) from IMU - retrying %d...\n", IMUHdgValDeg, retries);
-    //DEBUG!!
-    UpdateIMUHdgValDeg();
-    retries++;
-    delay(100);
-  }
-
-  //Step2: Compute new target value & timeout value
-  timeout_sec = 2 * numDeg / degPersec; //05/29/21 rev to use new turn rate parmeter
-
-  //05/17/20 limit timeout_sec to 1 sec or more
-  timeout_sec = (timeout_sec < 1) ? 1.f : timeout_sec;
-
-  //12/05/19 added #define back in to manage which direction increases yaw values
-#ifdef MPU6050_CCW_INCREASES_YAWVAL
-  tgt_deg = b_ccw ? IMUHdgValDeg + numDeg : IMUHdgValDeg - numDeg;
-#else
-  tgt_deg = b_ccw ? IMUHdgValDeg - numDeg : IMUHdgValDeg + numDeg;
-
-#endif // MPU6050_CCW_INCREASES_YAWVAL
-
-  //correct for -180/180 transition
-  if (tgt_deg < -180)
-  {
-    tgt_deg += 360;
-  }
-
-  //07/29/19 bugfix
-  if (tgt_deg > 180)
-  {
-    tgt_deg -= 360;
-  }
-
-  //DEBUG!!
-  //gl_pSerPort->printf("Init hdg = %4.2f deg, Turn = %4.2f  deg, tgt = %4.2f deg, timeout = %4.2f sec\n\n",
-  //  IMUHdgValDeg, numDeg, tgt_deg, timeout_sec);
-  //DEBUG!!
-
-  float curHdgMatchVal = 0;
-
-  //09/08/18 added to bolster end-of-turn detection
-  float prevHdgMatchVal = 0;
-  float matchSlope = 0;
-
-  //Step3: Run motors until target reached, using PID algorithm to control turn rate
-  Prev_HdgDeg = IMUHdgValDeg; //06/10/21 synch Prev_HdgDeg & IMUHdgValDeg just before entering loop
-
-  elapsedMillis mSecSinceTurnStart = 0;
-  MsecSinceLastTurnRateUpdate = 0;
-  float lastError = 0;
-  float lastInput = 0;
-  float lastIval = 0;
-  float lastDerror = 0;
-
-  //DEBUG!!
-  //gl_pSerPort->printf("Msec\tHdg\tPrvHdg\tdHdg\tRate\ttgtDPS\terr\tKp*err\tIval\tKd*Derr\tOut\tspeed\tMatch\tSlope\n");
-  //DEBUG!!
-
-  float avgrate = 0;
-  uint16_t numrates = 0;
-
-  while (!bDoneTurning && !bTimedOut)
-  {
-    //11/06/20 now just loops between PID calcs
-    CheckForUserInput();
-
-    if (MsecSinceLastTurnRateUpdate >= TURN_RATE_UPDATE_INTERVAL_MSEC)
-    {
-      MsecSinceLastTurnRateUpdate -= TURN_RATE_UPDATE_INTERVAL_MSEC;
-
-      UpdateIMUHdgValDeg(); //update IMUHdgValDeg
-
-      float dHdg = IMUHdgValDeg - Prev_HdgDeg;
-      if (dHdg > 180)
-      {
-        dHdg -= 360;
-        //Serial.printf("dHdg > 180 - subtracting 360\n");
-      }
-      else if (dHdg < -180)
-      {
-        dHdg += 360;
-        //Serial.printf("dHdg < -180 - adding 360\n");
-      }
-
-      //watch for turn rates that are wildly off
-      float rate = abs(1000 * dHdg / TURN_RATE_UPDATE_INTERVAL_MSEC);
-      avgrate += rate;
-      numrates++;
-
-      //if (rate > 3 * degPersec)
-      //{
-      //	//DEBUG!!
-      //	Serial.printf("hdg/prevhdg/dHdg/rate = %2.2f\t%2.2f\t%2.2f\t%2.2f, excessive rate - replacing with %2.2f\n", IMUHdgValDeg, Prev_HdgDeg, dHdg, rate, degPersec);
-      //	//DEBUG!!
-      //	rate = degPersec;
-      //}
-
-      //02/05/22 sampleTime removed from signature
-      TurnRatePIDOutput = PIDCalcs(rate, degPersec, lastError, lastInput, lastIval, lastDerror, Kp, Ki, Kd);
-
-      int speed = 0;
-
-      //05/31/22 now using MOTOR_SPEED_HALF for max motor speed
-      //06/01/22 and MOTOR_SPEED_OFF for low end
-      speed = (TurnRatePIDOutput > MOTOR_SPEED_HALF) ? MOTOR_SPEED_HALF : (int)TurnRatePIDOutput;
-      speed = (TurnRatePIDOutput <= MOTOR_SPEED_OFF) ? MOTOR_SPEED_OFF : (int)TurnRatePIDOutput;
-
-
-      //gl_pSerPort->printf("In RollingTurn in %s section\n", b_fwd == FWD_DIR ? "FWD" : "REV");
-
-      if (b_ccw)
-      {
-        if (b_fwd)
-        {
-          //this is the "1 1" case CCW & Fwd; rt motor fwd fast, left motor fwd slow
-          //gl_pSerPort->printf("In RollingTurn in 1 1 Case\n");
-          SetLeftMotorDirAndSpeed(true, MOTOR_SPEED_LOW - speed);
-          SetRightMotorDirAndSpeed(true, MOTOR_SPEED_LOW + speed);
-        }
-        else
-        {
-          //gl_pSerPort->printf("In RollingTurn in 1 0 Case\n");
-          //this is the "1 0" case CCW & Rev; rt motor rev slow, left motor rev fast
-          SetLeftMotorDirAndSpeed(false, MOTOR_SPEED_LOW + speed);
-          SetRightMotorDirAndSpeed(false, MOTOR_SPEED_LOW - speed);
-        }
-      }
-      else //must be CW
-      {
-        if (b_fwd)
-        {
-          //gl_pSerPort->printf("In RollingTurn in 0 1 Case\n");
-          //this is the "0 1" case CW & Fwd; rt motor fwd slow, left motor fwd fast
-          SetLeftMotorDirAndSpeed(true, MOTOR_SPEED_LOW + speed);
-          SetRightMotorDirAndSpeed(true, MOTOR_SPEED_LOW - speed);
-        }
-        else
-        {
-          //gl_pSerPort->printf("In RollingTurn in 0 0 Case\n");
-          //this is the "0 0" case CW & Rev; rt motor rev fast, left motor rev slow
-          SetLeftMotorDirAndSpeed(false, MOTOR_SPEED_LOW - speed);
-          SetRightMotorDirAndSpeed(false, MOTOR_SPEED_LOW + speed);
-        }
-      }
-
-      //check for nearly there and all the way there
-      curHdgMatchVal = GetHdgMatchVal(tgt_deg, IMUHdgValDeg);
-      matchSlope = curHdgMatchVal - prevHdgMatchVal;
-
-      //DEBUG!!
-      //gl_pSerPort->printf("%lu\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%d\t%2.1f\t%2.1f\n",
-      //  millis(),
-      //  IMUHdgValDeg,
-      //  Prev_HdgDeg,
-      //  dHdg,
-      //  rate,
-      //  degPersec,
-      //  lastError,
-      //  Kp * lastError,
-      //  lastIval,
-      //  Kd * lastDerror,
-      //  TurnRatePIDOutput,
-      //  speed,
-      //  curHdgMatchVal,
-      //  matchSlope);
-      //DEBUG!!
-
-      Prev_HdgDeg = IMUHdgValDeg; //re-synch prev to curr hdg for next time
-
-      //look for full match
-      bDoneTurning = (curHdgMatchVal >= HDG_FULL_MATCH_VAL
-        || (prevHdgMatchVal >= HDG_MIN_MATCH_VAL && matchSlope <= -0.01)); //have to use < vs <= as slope == 0 at start
-
-      //Serial.printf("curHdgMatchVal = %2.2f, prevHdgMatchVal = %2.2f, matchslope = %2.2f, bDoneTurning = %d\n",
-      //	curHdgMatchVal,
-      //	prevHdgMatchVal,
-      //	matchSlope,
-      //	bDoneTurning);
-
-      prevHdgMatchVal = curHdgMatchVal; //07/31/21 moved below bDoneTurning chk so can use prevHdgMatchVal vs curHdgMatchVal in slope check
-
-      bTimedOut = (mSecSinceTurnStart > timeout_sec * 1000);
-
-      if (bTimedOut)
-      {
-        //DEBUG!!
-        //gl_pSerPort->printf("timed out with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
-        //DEBUG!!
-
-        bResult = false;
-        break;
-      }
-
-      if (bDoneTurning)
-      {
-        //gl_pSerPort->printf("Completed turn with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
-
-        bResult = true;
-        break;
-      }
-    }
-  }
-
-  avgrate = avgrate / numrates;
-
-  //gl_pSerPort->printf("average turn rate = %2.1f\n", avgrate);
-
-  StopBothMotors();
-  //delay(1000); //added 04/27/21 for debug
-  return bResult;
-}
+//bool RollingTurn(bool b_ccw, bool b_fwd, float numDeg, float Kp, float Ki, float Kd, float degPersec) //04/25/21 added turn-rate arg (default = TURN_RATE_TARGET_DEGPERSEC)
+//{
+//  //Purpose: Make a numDeg CW or CCW 'rolling' turn
+//  //Inputs:
+//  //	b_ccw - True if turn is to be ccw, false otherwise
+//  //	numDeg - angle to be swept out in the turn
+//  //	ROLLING_TURN_MAX_SEC_PER_DEG = const used to generate timeout proportional to turn deg
+//  //	IMUHdgValDeg = IMU heading value updated by UpdateIMUHdgValDeg() //11/02/20 now updated in ISR
+//  //	degPerSec = float value denoting desired turn rate
+//  //  Kp, Ki, Kd = PID parameters
+//  //Plan:
+//  //	Step1: Get current heading as starting point
+//  //	Step2: Disable TIMER5 interrupts
+//  //	Step3: Compute new target value & timeout value
+//  //	Step4: Run motors until target reached, using inline PID algorithm to control turn rate
+//  //	Step5: Re-enable TIMER5 interrupts
+//  //Notes:
+//  //	06/06/21 we-written to remove PID library - now uses custom 'PIDCalcs()' function
+//  //	06/06/21 added re-try for 180.00 return from IMU - could be bad value
+//  //	06/11/21 added code to correct dHdg errors due to 179/-179 transition & bad IMU values
+//  //	06/12/21 cleaned up & commented out debug code
+//  //	11/14/21 removed 'first time skip' block; added motor start before entering loop
+//  //  03/22/22 added code to ensure numDeg >= 0
+//  //  06/01/22 now using MOTOR_SPEED_HALF for max motor speed and MOTOR_SPEED_OFF for low end
+//  //  12/03/22 copied from 'SpinTurn()' and adapted for 'rolling turn' algorithm
+//  //  12/05/22 added 'isFwd' to signature, and added code to support backwards rolling turns
+//  //  02/03/23 copied here from WallE3_RollingTurn_V1
+//
+//  float tgt_deg;
+//  float timeout_sec;
+//  bool bDoneTurning = false;
+//  bool bTimedOut = false;
+//  bool bResult = true; //04/21/20 added so will be only one exit point
+//
+//  numDeg = abs(numDeg);//  03/22/22 added to ensure numDeg >= 0
+//  //DEBUG!!
+//  //gl_pSerPort->printf("In RollingTurn(%s, %s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
+//  //  b_ccw == TURNDIR_CCW ? "CCW" : "CW", b_fwd == FWD_DIR ? "FWD" : "REV", numDeg, degPersec,
+//  //  Kp, Ki, Kd);
+//  //DEBUG!!
+//
+//  //no need to continue if the IMU isn't available
+//  if (!dmpReady)
+//  {
+//    Serial.printf("DMP Failure - returning FALSE\n");
+//    return false;
+//  }
+//
+//  //Step1: Get current heading as starting point
+//    //06/06/21 it is possible for IMU to return 180.00 on failure
+//    //so try again.  If it really IS 180, then 
+//    //it will eventually time out and go on
+//
+//  //08/26/21 re-wrote using 3-value array to make sure initial heading is a steady value
+//  UpdateIMUHdgValDeg();
+//
+//  int retries = 0;
+//  if ((IMUHdgValDeg == 180.f || IMUHdgValDeg == 0.f) && retries < 5)
+//  {
+//    //DEBUG!!
+//    //gl_pSerPort->printf("Got 180.00 or 0.00 exactly (%2.3f) from IMU - retrying %d...\n", IMUHdgValDeg, retries);
+//    //DEBUG!!
+//    UpdateIMUHdgValDeg();
+//    retries++;
+//    delay(100);
+//  }
+//
+//  //Step2: Compute new target value & timeout value
+//  timeout_sec = 2 * numDeg / degPersec; //05/29/21 rev to use new turn rate parmeter
+//
+//  //05/17/20 limit timeout_sec to 1 sec or more
+//  timeout_sec = (timeout_sec < 1) ? 1.f : timeout_sec;
+//
+//  //12/05/19 added #define back in to manage which direction increases yaw values
+//#ifdef MPU6050_CCW_INCREASES_YAWVAL
+//  tgt_deg = b_ccw ? IMUHdgValDeg + numDeg : IMUHdgValDeg - numDeg;
+//#else
+//  tgt_deg = b_ccw ? IMUHdgValDeg - numDeg : IMUHdgValDeg + numDeg;
+//
+//#endif // MPU6050_CCW_INCREASES_YAWVAL
+//
+//  //correct for -180/180 transition
+//  if (tgt_deg < -180)
+//  {
+//    tgt_deg += 360;
+//  }
+//
+//  //07/29/19 bugfix
+//  if (tgt_deg > 180)
+//  {
+//    tgt_deg -= 360;
+//  }
+//
+//  //DEBUG!!
+//  //gl_pSerPort->printf("Init hdg = %4.2f deg, Turn = %4.2f  deg, tgt = %4.2f deg, timeout = %4.2f sec\n\n",
+//  //  IMUHdgValDeg, numDeg, tgt_deg, timeout_sec);
+//  //DEBUG!!
+//
+//  float curHdgMatchVal = 0;
+//
+//  //09/08/18 added to bolster end-of-turn detection
+//  float prevHdgMatchVal = 0;
+//  float matchSlope = 0;
+//
+//  //Step3: Run motors until target reached, using PID algorithm to control turn rate
+//  Prev_HdgDeg = IMUHdgValDeg; //06/10/21 synch Prev_HdgDeg & IMUHdgValDeg just before entering loop
+//
+//  elapsedMillis mSecSinceTurnStart = 0;
+//  MsecSinceLastTurnRateUpdate = 0;
+//  float lastError = 0;
+//  float lastInput = 0;
+//  float lastIval = 0;
+//  float lastDerror = 0;
+//
+//  //DEBUG!!
+//  //gl_pSerPort->printf("Msec\tHdg\tPrvHdg\tdHdg\tRate\ttgtDPS\terr\tKp*err\tIval\tKd*Derr\tOut\tspeed\tMatch\tSlope\n");
+//  //DEBUG!!
+//
+//  float avgrate = 0;
+//  uint16_t numrates = 0;
+//
+//  while (!bDoneTurning && !bTimedOut)
+//  {
+//    //11/06/20 now just loops between PID calcs
+//    CheckForUserInput();
+//
+//    if (MsecSinceLastTurnRateUpdate >= TURN_RATE_UPDATE_INTERVAL_MSEC)
+//    {
+//      MsecSinceLastTurnRateUpdate -= TURN_RATE_UPDATE_INTERVAL_MSEC;
+//
+//      UpdateIMUHdgValDeg(); //update IMUHdgValDeg
+//
+//      float dHdg = IMUHdgValDeg - Prev_HdgDeg;
+//      if (dHdg > 180)
+//      {
+//        dHdg -= 360;
+//        //Serial.printf("dHdg > 180 - subtracting 360\n");
+//      }
+//      else if (dHdg < -180)
+//      {
+//        dHdg += 360;
+//        //Serial.printf("dHdg < -180 - adding 360\n");
+//      }
+//
+//      //watch for turn rates that are wildly off
+//      float rate = abs(1000 * dHdg / TURN_RATE_UPDATE_INTERVAL_MSEC);
+//      avgrate += rate;
+//      numrates++;
+//
+//      //if (rate > 3 * degPersec)
+//      //{
+//      //	//DEBUG!!
+//      //	Serial.printf("hdg/prevhdg/dHdg/rate = %2.2f\t%2.2f\t%2.2f\t%2.2f, excessive rate - replacing with %2.2f\n", IMUHdgValDeg, Prev_HdgDeg, dHdg, rate, degPersec);
+//      //	//DEBUG!!
+//      //	rate = degPersec;
+//      //}
+//
+//      //02/05/22 sampleTime removed from signature
+//      TurnRatePIDOutput = PIDCalcs(rate, degPersec, lastError, lastInput, lastIval, lastDerror, Kp, Ki, Kd);
+//
+//      int speed = 0;
+//
+//      //05/31/22 now using MOTOR_SPEED_HALF for max motor speed
+//      //06/01/22 and MOTOR_SPEED_OFF for low end
+//      speed = (TurnRatePIDOutput > MOTOR_SPEED_HALF) ? MOTOR_SPEED_HALF : (int)TurnRatePIDOutput;
+//      speed = (TurnRatePIDOutput <= MOTOR_SPEED_OFF) ? MOTOR_SPEED_OFF : (int)TurnRatePIDOutput;
+//
+//
+//      //gl_pSerPort->printf("In RollingTurn in %s section\n", b_fwd == FWD_DIR ? "FWD" : "REV");
+//
+//      if (b_ccw)
+//      {
+//        if (b_fwd)
+//        {
+//          //this is the "1 1" case CCW & Fwd; rt motor fwd fast, left motor fwd slow
+//          //gl_pSerPort->printf("In RollingTurn in 1 1 Case\n");
+//          SetLeftMotorDirAndSpeed(true, MOTOR_SPEED_LOW - speed);
+//          SetRightMotorDirAndSpeed(true, MOTOR_SPEED_LOW + speed);
+//        }
+//        else
+//        {
+//          //gl_pSerPort->printf("In RollingTurn in 1 0 Case\n");
+//          //this is the "1 0" case CCW & Rev; rt motor rev slow, left motor rev fast
+//          SetLeftMotorDirAndSpeed(false, MOTOR_SPEED_LOW + speed);
+//          SetRightMotorDirAndSpeed(false, MOTOR_SPEED_LOW - speed);
+//        }
+//      }
+//      else //must be CW
+//      {
+//        if (b_fwd)
+//        {
+//          //gl_pSerPort->printf("In RollingTurn in 0 1 Case\n");
+//          //this is the "0 1" case CW & Fwd; rt motor fwd slow, left motor fwd fast
+//          SetLeftMotorDirAndSpeed(true, MOTOR_SPEED_LOW + speed);
+//          SetRightMotorDirAndSpeed(true, MOTOR_SPEED_LOW - speed);
+//        }
+//        else
+//        {
+//          //gl_pSerPort->printf("In RollingTurn in 0 0 Case\n");
+//          //this is the "0 0" case CW & Rev; rt motor rev fast, left motor rev slow
+//          SetLeftMotorDirAndSpeed(false, MOTOR_SPEED_LOW - speed);
+//          SetRightMotorDirAndSpeed(false, MOTOR_SPEED_LOW + speed);
+//        }
+//      }
+//
+//      //check for nearly there and all the way there
+//      curHdgMatchVal = GetHdgMatchVal(tgt_deg, IMUHdgValDeg);
+//      matchSlope = curHdgMatchVal - prevHdgMatchVal;
+//
+//      //DEBUG!!
+//      //gl_pSerPort->printf("%lu\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%d\t%2.1f\t%2.1f\n",
+//      //  millis(),
+//      //  IMUHdgValDeg,
+//      //  Prev_HdgDeg,
+//      //  dHdg,
+//      //  rate,
+//      //  degPersec,
+//      //  lastError,
+//      //  Kp * lastError,
+//      //  lastIval,
+//      //  Kd * lastDerror,
+//      //  TurnRatePIDOutput,
+//      //  speed,
+//      //  curHdgMatchVal,
+//      //  matchSlope);
+//      //DEBUG!!
+//
+//      Prev_HdgDeg = IMUHdgValDeg; //re-synch prev to curr hdg for next time
+//
+//      //look for full match
+//      bDoneTurning = (curHdgMatchVal >= HDG_FULL_MATCH_VAL
+//        || (prevHdgMatchVal >= HDG_MIN_MATCH_VAL && matchSlope <= -0.01)); //have to use < vs <= as slope == 0 at start
+//
+//      //Serial.printf("curHdgMatchVal = %2.2f, prevHdgMatchVal = %2.2f, matchslope = %2.2f, bDoneTurning = %d\n",
+//      //	curHdgMatchVal,
+//      //	prevHdgMatchVal,
+//      //	matchSlope,
+//      //	bDoneTurning);
+//
+//      prevHdgMatchVal = curHdgMatchVal; //07/31/21 moved below bDoneTurning chk so can use prevHdgMatchVal vs curHdgMatchVal in slope check
+//
+//      bTimedOut = (mSecSinceTurnStart > timeout_sec * 1000);
+//
+//      if (bTimedOut)
+//      {
+//        //DEBUG!!
+//        //gl_pSerPort->printf("timed out with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
+//        //DEBUG!!
+//
+//        bResult = false;
+//        break;
+//      }
+//
+//      if (bDoneTurning)
+//      {
+//        //gl_pSerPort->printf("Completed turn with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
+//
+//        bResult = true;
+//        break;
+//      }
+//    }
+//  }
+//
+//  avgrate = avgrate / numrates;
+//
+//  //gl_pSerPort->printf("average turn rate = %2.1f\n", avgrate);
+//
+//  StopBothMotors();
+//  //delay(1000); //added 04/27/21 for debug
+//  return bResult;
+//}
 
 //06/13/23 added to detect 'spinning out of control' conditon
-bool IsSpinning()
-{
-  //Purpose: detect 'spinning' condx
-  //Inputs: 
-  // gl_HdgHistoryArray = HEADING_HISTORY_ARRAY_SIZE element array of heading values
-  //Outputs: returns TRUE if the cumulative heading change throughout the history array > 360
-  //         else returns FALSE
-
-  bool result = false;
-  float deltaHdg = 0;
-  float cumHdg = 0;
-  //gl_pSerPort->printf("\nHdg\tDHdg\tCumHdg\n");
-  for (uint16_t i = 1; i < HEADING_HISTORY_ARRAY_SIZE - 1; i++)
-  {
-    //deltaHdg = abs(gl_HdgHistoryArray[i - 1] - gl_HdgHistoryArray[i]);
-    deltaHdg = gl_HdgHistoryArray[i - 1] - gl_HdgHistoryArray[i];
-
-    //adjust for +180 to -179 transition
-    if (deltaHdg > 180)
-    {
-      deltaHdg = deltaHdg - 360;
-    }
-    else if (deltaHdg < -180)
-    {
-      deltaHdg = deltaHdg + 360;
-    }
-
-    cumHdg += deltaHdg;
-
-    //gl_pSerPort->printf("%2.2f\t%2.2f\t%2.2f\n", gl_HdgHistoryArray[i], deltaHdg, cumHdg); //prints out at end of line in "HDG_ONLY" mode
-
-    //if (cumHdg > 360)
-    if (abs(cumHdg) > 360)
-    {
-      //DEBUG!!
-      gl_pSerPort->printf("IsSpinning(): Spin condx detected with Hdg = %2.2f, cumHdg = %2.2f, idx = %d\n", gl_HdgHistoryArray[i - 1], cumHdg, i);
-
-      for (uint16_t i = 0; i < HEADING_HISTORY_ARRAY_SIZE; i++)
-      {
-        gl_pSerPort->printf("gl_HdgHistoryArray[%d] = %2.2f\n", i, gl_HdgHistoryArray[i]);
-
-      }
-      //DEBUG!!
-
-      InitHeadingHistoryArray();//added 06/14/23
-
-      result = true;
-      cumHdg = 0;
-    }
-  }
-
-  return result;
-}
+//bool IsSpinning()
+//{
+//  //Purpose: detect 'spinning' condx
+//  //Inputs: 
+//  // gl_HdgHistoryArray = HEADING_HISTORY_ARRAY_SIZE element array of heading values
+//  //Outputs: returns TRUE if the cumulative heading change throughout the history array > 360
+//  //         else returns FALSE
+//
+//  bool result = false;
+//  float deltaHdg = 0;
+//  float cumHdg = 0;
+//  //gl_pSerPort->printf("\nHdg\tDHdg\tCumHdg\n");
+//  for (uint16_t i = 1; i < HEADING_HISTORY_ARRAY_SIZE - 1; i++)
+//  {
+//    //deltaHdg = abs(gl_HdgHistoryArray[i - 1] - gl_HdgHistoryArray[i]);
+//    deltaHdg = gl_HdgHistoryArray[i - 1] - gl_HdgHistoryArray[i];
+//
+//    //adjust for +180 to -179 transition
+//    if (deltaHdg > 180)
+//    {
+//      deltaHdg = deltaHdg - 360;
+//    }
+//    else if (deltaHdg < -180)
+//    {
+//      deltaHdg = deltaHdg + 360;
+//    }
+//
+//    cumHdg += deltaHdg;
+//
+//    //gl_pSerPort->printf("%2.2f\t%2.2f\t%2.2f\n", gl_HdgHistoryArray[i], deltaHdg, cumHdg); //prints out at end of line in "HDG_ONLY" mode
+//
+//    //if (cumHdg > 360)
+//    if (abs(cumHdg) > 360)
+//    {
+//      //DEBUG!!
+//      gl_pSerPort->printf("IsSpinning(): Spin condx detected with Hdg = %2.2f, cumHdg = %2.2f, idx = %d\n", gl_HdgHistoryArray[i - 1], cumHdg, i);
+//
+//      for (uint16_t i = 0; i < HEADING_HISTORY_ARRAY_SIZE; i++)
+//      {
+//        gl_pSerPort->printf("gl_HdgHistoryArray[%d] = %2.2f\n", i, gl_HdgHistoryArray[i]);
+//
+//      }
+//      //DEBUG!!
+//
+//      InitHeadingHistoryArray();//added 06/14/23
+//
+//      result = true;
+//      cumHdg = 0;
+//    }
+//  }
+//
+//  return result;
+//}
 
 void InitHeadingHistoryArray()
 {
@@ -4071,3 +4031,133 @@ void InitHeadingHistoryArray()
 
 }
 #pragma endregion HDG_BASED_TURN_SUPPORT
+
+#pragma region MISCELLANEOUS
+
+void EnableAllRearLEDs(bool bEnable)
+{
+  //Purpose:  Turns all 4 LEDs ON or OFF (LOW is ON)
+  //Provenance: Created 05/02/17 gfp
+
+  if (bEnable)
+  {
+    //gl_pSerPort->printf("EnableAllRearLEDs(TRUE) - setting all LED lines LOW\n");
+    digitalWrite(CHG_CONNECT_LED_PIN, LOW);
+    digitalWrite(_20PCT_LED_PIN, LOW);
+    digitalWrite(_40PCT_LED_PIN, LOW);
+    digitalWrite(_60PCT_LED_PIN, LOW);
+    digitalWrite(_80PCT_LED_PIN, LOW);
+    digitalWrite(CHG_FIN_LED_PIN, LOW);
+  }
+  else
+  {
+    //gl_pSerPort->printf("EnableAllRearLEDs(FALSE) - setting all LED lines HIGH\n");
+    digitalWrite(CHG_CONNECT_LED_PIN, HIGH);
+    digitalWrite(_20PCT_LED_PIN, HIGH);
+    digitalWrite(_40PCT_LED_PIN, HIGH);
+    digitalWrite(_60PCT_LED_PIN, HIGH);
+    digitalWrite(_80PCT_LED_PIN, HIGH);
+    digitalWrite(CHG_FIN_LED_PIN, HIGH);
+  }
+}
+
+void YellForHelp()
+{
+  //Purpose: last-ditch effort to preserve the battery.  All non-essential loads are shut down
+  //		   and an visual/audible SOS is sounded forever
+  //Inputs: Call from OpMode case switch when GetBattVoltage() returns a below-threshold value
+  //Outputs: 
+  //	All wheel motors stopped
+  //	All rear panel LED's turned OFF
+  //	PWM 'SOS' tones on SOS_PWM_PIN
+  //Plan:
+  //	Step1: Turn off wheel motors
+  //	Step2: Turn off all rear panel LEDs
+  //	Step3: Send SOS to speaker, the purple rear panel LEDs, and the red laser
+  //Notes:
+  //	01/16/18 - SOS tone code copied from PWMTest.pde
+
+//Step1: Turn off wheel motors
+  StopBothMotors();
+
+  //Step2: Turn off all rear panel LEDs
+  EnableAllRearLEDs(false);
+
+  //Step3: infinite loop to xmit SOS on speaker and the purple rear panel LEDs
+  while (!gl_bChgConnect)//12/16/20 rev to use ISR-generated value
+  {
+    uint16_t DOT_MS = 200;
+    uint16_t DASH_MS = 800;
+    uint16_t HIGHTONE = 1000;
+
+
+    //Send 'S'
+    for (size_t i = 0; i < 3; i++)
+    {
+      digitalWrite(RED_LASER_DIODE_PIN, HIGH); //turn laser on
+      digitalWrite(CHG_FIN_LED_PIN, LOW); //turn LED on
+      digitalWrite(CHG_CONNECT_LED_PIN, LOW); //turn LED on
+      tone(SOS_PWM_PIN, HIGHTONE, DOT_MS); //returns immediately
+      delay(DOT_MS);              //delay for LED viewing
+      digitalWrite(CHG_FIN_LED_PIN, HIGH); //turn LED off
+      digitalWrite(CHG_CONNECT_LED_PIN, HIGH); //turn LED off
+      digitalWrite(RED_LASER_DIODE_PIN, LOW); //turn laser off
+      delay(DOT_MS);              //inter-symbol spacing
+    }
+    delay(DOT_MS); //inter-letter spacing
+
+    //Send 'O'
+    for (size_t i = 0; i < 3; i++)
+    {
+      digitalWrite(RED_LASER_DIODE_PIN, HIGH); //turn laser on
+      digitalWrite(CHG_FIN_LED_PIN, LOW); //turn LED on
+      digitalWrite(CHG_CONNECT_LED_PIN, LOW); //turn LED on
+      tone(SOS_PWM_PIN, HIGHTONE, DASH_MS); //returns immediately
+      delay(DASH_MS);              //delay for LED viewing
+      digitalWrite(CHG_FIN_LED_PIN, HIGH); //turn LED off
+      digitalWrite(CHG_CONNECT_LED_PIN, HIGH); //turn LED off
+      digitalWrite(RED_LASER_DIODE_PIN, LOW); //turn laser off
+      delay(DOT_MS);              //inter-symbol spacing
+    }
+    delay(DOT_MS); //inter-letter spacing
+
+    //Send 'S'
+    for (size_t i = 0; i < 3; i++)
+    {
+      digitalWrite(RED_LASER_DIODE_PIN, HIGH); //turn laser on
+      digitalWrite(CHG_FIN_LED_PIN, LOW); //turn LED on
+      digitalWrite(CHG_CONNECT_LED_PIN, LOW); //turn LED on
+      tone(SOS_PWM_PIN, HIGHTONE, DOT_MS); //returns immediately
+      delay(DOT_MS);              //delay for LED viewing
+      digitalWrite(CHG_FIN_LED_PIN, HIGH); //turn LED off
+      digitalWrite(CHG_CONNECT_LED_PIN, HIGH); //turn LED off
+      digitalWrite(RED_LASER_DIODE_PIN, LOW); //turn laser off
+      delay(DOT_MS);              //inter-symbol spacing
+    }
+
+    delay(10 * DOT_MS);         // inter-message spacing
+
+    //UpdateAllEnvironmentParameters(); //06/12/22 added to update gl_bChgConnect
+    //CheckForUserInput(); //added 06/14/22
+  }
+}
+
+float GetVoltage(uint8_t volt_pin)
+{
+  //02/18/17 get corrected battery voltage.  Voltage reading is 1/3 actual Vbatt value
+  int analog_batt_reading = analogRead(volt_pin);//analogReadAveraging(8) in setup() does internal averaging
+  float calc_volts = ZENER_VOLTAGE_OFFSET + ADC_REF_VOLTS * (float)analog_batt_reading / (float)MAX_AD_COUNT;
+
+  //DEBUG!!
+  //for(int i = 0; i < 8;i++)
+  //{
+  //  int analog_batt_reading = analogRead(BATT_MON_PIN);//analogReadAveraging(8) in setup() does internal averaging
+  //  float calc_volts = ZENER_VOLTAGE_OFFSET + ADC_REF_VOLTS * (float)analog_batt_reading / (float)MAX_AD_COUNT;
+  //  gl_pSerPort->printf("a/d = %d, calc = %2.2f\n", analog_batt_reading,calc_volts);
+  //  delay(100);
+  //}
+  //DEBUG!!
+  return calc_volts;
+}
+
+#pragma endregion MISCELLANEOUS

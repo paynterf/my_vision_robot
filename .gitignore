@@ -102,3 +102,6 @@ depth_*.png
 # Temporary backup folders
 backup_*/
 backup_scripts_*/
+/firmware/VisionEnhanced4WheelRobot/Post Material/*.mp4
+/firmware/VisionEnhanced4WheelRobot/Post Material/*.MOV
+/firmware/VisionEnhanced4WheelRobot/Post Material/*.JPG
