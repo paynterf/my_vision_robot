@@ -28,7 +28,7 @@ extern "C"
 //#define NO_MPU6050 //added 01/23/22
 //#define IR_HOMING_ONLY
 //#define NO_FRONT_LIDAR
-//#define NO_VL53L0X //01/08/22 now used for VL53L0X hardware
+//#define NO_VL53L1X //09/02/26 now only used for rear VL53L1X sensor
 //#define NO_IRDET //added 04/05/17 for daytime in-atrium testing (too much ambient IR)
 //#define DISTANCES_ONLY //added 11/14/18 to just display distances in infinite loop
 //#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
@@ -44,8 +44,8 @@ extern "C"
 #pragma region I2C_ADDRESSES
 #define IRDET_I2C_ADDR 0x08
 #define MPU6050_I2C_ADDR 0x68
-//const uint16_t VL53L0X_I2C_SLAVE_ADDRESS = 0x20; ////Teensy 3.5 VL53L0X ToF LIDAR controller
-#define VL53L0X_I2C_SLAVE_ADDRESS 0x20 //Teensy 3.5 VL53L0X ToF LIDAR controller - chg to #define 02/01/23
+//const uint16_t VL53L1X_I2C_SLAVE_ADDRESS = 0x20; ////Teensy 3.5 VL53L1X ToF LIDAR controller
+#define VL53L1X_I2C_SLAVE_ADDRESS 0x20 //Teensy 3.5 VL53L1X ToF LIDAR controller - chg to #define 02/01/23
 //uint8_t IR_HOMING_MODULE_SLAVE_ADDR = 8;  //uint8_t type reqd here for Wire.requestFrom() call
 #define IR_HOMING_MODULE_SLAVE_ADDR 8  //uint8_t type reqd here for Wire.requestFrom() call - chg to #define 02/01/23
 //#define GARMIN_LIDAR_I2C_ADDR 0x62  //added 02/25/23 for Garmin LIDAR-Lite V4/LED on main Teensy Wire2
@@ -63,10 +63,11 @@ const uint16_t MSEC_PER_IR_HOMING_ADJ = 150; //06/27/22 100ms is too fast for Ge
 //const int MSEC_PER_DIST_UPDATE = 100; //10/02/22 rev to speed up rate indep of front LIDAR
 const int MSEC_PER_DIST_UPDATE = 50; //10/02/22 rev to speed up rate indep of front LIDAR
 const uint16_t WALL_TRACK_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE;//10/02/22 rev to make these two intervals the same
-//const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = 250; //10/02/22 added to separate out slow front LIDAR from faster VL53L0X sensors
+//const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = 250; //10/02/22 added to separate out slow front LIDAR from faster VL53L1X sensors
 const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE; //03/15/23 Garmin LIDAR can easily keep up with other sensors
 const uint16_t TURN_RATE_UPDATE_INTERVAL_MSEC = 30; //30 mSec is as fast as it can go
-const uint16_t PRINT_INTERVAL_MSEC = 100; //added 09/25/23
+const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 100; //added 09/25/23
+const uint16_t TELEMETRY_HEADER_PRINT_INTERVAL_MSEC = 50 * TELEMETRY_PRINT_INTERVAL_MSEC; //added 09/01/26
 
 elapsedMillis MsecSinceLastAdj; //added 05/24/22 for ParallelOrientation() routine
 elapsedMillis MsecSinceLastIRHomingAdj; //01/07/22 used for #ifdef IR_HOMING_ONLY block
@@ -75,6 +76,7 @@ elapsedMillis MsecSinceLastTurnRateUpdate;//heading/rate based turn support
 elapsedMillis mSecSinceLastWallTrackUpdate;
 elapsedMillis MsecSinceLastFrontDistUpdate; //10/02/22 slower update rate needed for front LIDAR
 elapsedMillis mSecSinceLastTelemetryUpdate; //09/25/23 added to reduce telemetry printout frequency
+elapsedMillis mSecSinceLastTelemetryHeader; //09/25/23 added to reduce telemetry printout frequency
 #pragma endregion TIME INTERVALS
 
 #pragma region ADC CONSTANTS
@@ -86,7 +88,8 @@ const float VOLTAGE_TO_CURRENT_RATIO = 1.f; //Used for both 'Total' and 'Run' se
 #pragma endregion ADC CONSTANTS
 
 #pragma region TELEMETRYSTRINGS
-const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tHdg";
+//const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearVar\tHdg";
+const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg";
 const char* IRHomingTelemStr = "Time\tBattV\tFin1\tFin2\tSteer\tPID_Out\t\tLSpd\tRSpd\tFrontD\tRearD";
 const char* IRHomingTelemStrNoPings = "Time\tBattV\tFin1\tFin2\tSteer\tPID_Out\t\tLSpd\tRSpd\n";
 
@@ -100,6 +103,7 @@ const char* ChargingTelemStr = "ChgSec\tBattV\tTotalI\tRunI\tChgI\tbChging\n"; /
 
 const char* PIDTuneHdrStr = "\nSec\tCen\tF\tR\tSteer\tcorrD\tadjF\tkP\tkI\tkD\tOut\tLSpd\tRSpd\n";
 const char* PIDTuneTelemStr = "%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%d\t%d\n";//07/22/23 Wall track PID tuning telemetry.
+bool gl_bIsFirstLoopTelemetrySend = true;
 
 #pragma endregion Mode-specific telemetry header strings
 
@@ -128,6 +132,68 @@ const float _80PCT_BATT_VOLTS = DEAD_BATT_THRESH_VOLTS + 0.8f * (FULL_BATT_VOLTS
 const float _90PCT_BATT_VOLTS = DEAD_BATT_THRESH_VOLTS + 0.9f * (FULL_BATT_VOLTS - DEAD_BATT_THRESH_VOLTS);//8.16V
 const float ZENER_VOLTAGE_OFFSET = 5.96; //03/14/22 measured zener voltage
 #pragma endregion Battery Constants
+
+#pragma region DISTANCE_MEASUREMENT_SUPPORT
+//misc LIDAR and Ping sensor parameters
+const uint16_t FRONT_OBSTACLE_DETECTION_DIST_CM = 30; //rev 04/28/17 for better obstacle handling
+const uint16_t CHG_STN_AVOIDANCE_DIST_CM = 40; //added 03/11/17 for charge stn avoidance
+const uint16_t MAX_FRONT_DISTANCE_CM = 1000;//03/05/23 Garmin LIDAR-Lite V4/LED can handle up to 10m
+//const uint16_t MAX_LR_DISTANCE_CM = 200;  //04/19/15 now using sep parameters for front and side sensors
+const uint16_t MAX_LR_DISTANCE_CM = 400;  //05/02/23 replaced VL53L1X sensors with VL53L1X
+//const uint16_t MAX_TRACKING_DISTANCE_CM = 100;  //02/08/23 added for 'IsOpenDoorway()' support
+const uint16_t MAX_TRACKING_DISTANCE_CM = 100;
+
+//added 10/24/20
+const uint16_t STUCK_AHEAD_BACKUP_DIST_CM = 20; //11/21/28 shortened slightly
+const uint16_t STUCK_AHEAD_SIDESTEP_DIST_CM = 30;//03/15/23 increased from 15 to 30cm
+const uint16_t MAX_REAR_DISTANCE_CM = MAX_LR_DISTANCE_CM; //03/18/23 rev to make equal to L/R dist
+const uint16_t REAR_OBSTACLE_DETECTION_DIST_CM = 10;
+const uint16_t STUCK_BACKUP_TIME_MSEC = 1000;
+const uint16_t STUCK_FORWARD_TIME_MSEC = 1000;
+const uint16_t STUCK_BEHIND_FWD_TVL_DIST_CM = 10; //03/18/23 added
+const uint16_t REAR_OBSTACLE_FWD_TVL_DIST_CM = STUCK_BEHIND_FWD_TVL_DIST_CM; //added 09/03/22
+const uint16_t ROBOT_LENGTH_CM = 25; //03/18/23 added
+
+
+//04/01/2015 added for 'stuck' detection support
+//const uint16_t FRONT_DIST_ARRAY_SIZE = 50; //11/22/20 doubled to acct for 10Hz update rate
+//const uint16_t FRONT_DIST_ARRAY_SIZE = 100; //08/13/23 doubled again to acct for 20Hz update rate
+const uint16_t FRONT_DIST_AVG_WINDOW_SIZE = 3; //moved here & renamed 04/28/19
+const uint16_t LR_DIST_ARRAY_SIZE = 3; //04/28/19 added to reinstate l/r dist running avg
+const uint16_t LR_AVG_WINDOW_SIZE = 3; //added 04/28/19 so front & lr averages can differ
+const uint16_t STUCK_FRONT_VARIANCE_THRESHOLD = 50; //chg to 50 04/28/17
+const uint16_t STUCK_REAR_VARIANCE_THRESHOLD = 50; //added 01/08/22
+const uint16_t NO_LIDAR_FRONT_VAR_VAL = 10 * STUCK_FRONT_VARIANCE_THRESHOLD; //01/16/19
+
+//04/28/19 added to reinstate l/r dist running avg
+//06/28/20 chg to uint_16 to accomodate higher max value
+//uint16_t aFrontDistCM[FRONT_DIST_ARRAY_SIZE];
+//
+////04/18/19 rev to use float vs int
+//float aLeftDistCM[LR_DIST_ARRAY_SIZE];
+//float aRightDistCM[LR_DIST_ARRAY_SIZE];
+//float aRearDistCM[REAR_DIST_ARRAY_SIZE];
+
+//09/09/23 Experiment with compile-time adjustable array sizes
+const uint16_t STUCK_TIME_FRAME_SEC = 5;
+const uint16_t AVG_HDG_TIME_FRAME_SEC = 3;
+const uint16_t STUCK_ARRAY_SIZE = (uint16_t)1000 * STUCK_TIME_FRAME_SEC / MSEC_PER_DIST_UPDATE;
+const uint16_t FRONT_DIST_ARRAY_SIZE = STUCK_ARRAY_SIZE; //09/09/23 changed to eliminate 'magic number' 
+//const uint16_t REAR_DIST_ARRAY_SIZE = 50; //02/28/22 bumped to 50
+const uint16_t REAR_DIST_ARRAY_SIZE = FRONT_DIST_ARRAY_SIZE; //09/30/23 made equal to FRONT_DIST_ARRAY_SIZE
+const uint16_t AVG_HDG_ARRAY_SIZE = (uint16_t)1000 * AVG_HDG_TIME_FRAME_SEC / MSEC_PER_DIST_UPDATE;
+
+//04/18/19 rev to use float vs int
+uint16_t aFrontDistCM[STUCK_ARRAY_SIZE];
+float aLeftDistCM[LR_DIST_ARRAY_SIZE];
+float aRightDistCM[LR_DIST_ARRAY_SIZE];
+float aRearDistCM[STUCK_ARRAY_SIZE];
+float aAvgHdgDeg[AVG_HDG_ARRAY_SIZE];
+
+//added 05/15/24
+const uint16_t MAX_MOVE_TO_DIST_ERROR_PCT = 5;
+
+#pragma endregion Distance Measurement Support
 
 
 #pragma region PIN ASSIGNMENTS
@@ -175,10 +241,10 @@ const uint8_t SPEAKER_PIN = 2;
 
 //02/23/23 replace Pulsed Light LIDAR with Garmin LIDAR-Lite V4/LED @ 0x62
 //const uint16_t LIDAR_MODE_PIN = 3; //LIDAR MODE pin (continuous mode)
-//const uint16_t VL53L0X_TEENSY_RESET_PIN = 4; //pulled low for 1 mSec in Setup()
+//const uint16_t VL53L1X_TEENSY_RESET_PIN = 4; //pulled low for 1 mSec in Setup()
 const uint16_t LIDAR_SCL_PIN = 3;//SCL2 Purple
 const uint16_t LIDAR_SDA_PIN = 4;//SDA2 Orange
-const uint16_t VL53L0X_TEENSY_RESET_PIN = 26; //pulled low for 1 mSec in Setup() Gray
+const uint16_t VL53L1X_TEENSY_RESET_PIN = 26; //pulled low for 1 mSec in Setup() Gray
 
 //Miscellaneous pins
 const uint16_t HOMING_PID_COMPUTE_CALL_PIN = CHG_CONNECT_LED_PIN; //using same LED for two indications
@@ -552,6 +618,7 @@ void setup()
 #pragma endregion I2C_PORTS
 
 #pragma region REAR LIDAR
+#ifndef NO_VL53L1X
 
   // Reset the sensor
   pinMode(XSHUT_PIN, OUTPUT);
@@ -574,6 +641,13 @@ void setup()
   lidar_Rear.setDistanceMode(VL53L1X::Long);
   lidar_Rear.setMeasurementTimingBudget(50000);
   lidar_Rear.startContinuous(50);
+
+  gl_pSerPort->printf(F("Initializing Rear Distance Array..."));
+  InitRearDistArray();
+  gl_pSerPort->println(F("Done"));
+
+
+#endif // NO_VL53L1X
 
 #pragma endregion REAR LIDAR
 
@@ -653,9 +727,8 @@ void setup()
 
   CheckForUserInput(); //01/13/22 - here so OTA procedure can maybe start faster
 
-  //LoopTelemStr = "Time\tBattV\tBotI\tChgI\tRearCm\tHdg";
-  //Serial.println(LoopTelemStr);
-  //Serial1.println(LoopTelemStr);
+  mSecSinceLastTelemetryHeader = 0;
+  mSecSinceLastTelemetryUpdate = 0;
   gl_pSerPort->println(LoopTelemStr);
 }
 
@@ -666,18 +739,21 @@ void loop()
 
   digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
 
-  //added 10/23/20 for rear sensor
-  gl_RearCm = (float)lidar_Rear.read() / 10.0;
-  float BattV = GetVoltage(SW_BATT_VOLT_PIN);
-  float TopI = GetAmps(I_TOP_PIN);
-  float BotI = GetAmps(I_BOT_PIN);
-  float ChgI = GetAmps(I_CHG_PIN);
-  UpdateIMUHdgValDeg(); //updates IMUHdgValDeg
-
-  //Serial.printf("\Msec\tBattV\tTop_I\tBot_I\tChg_I\tRear_mm\n");
-  //Serial.printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, IMUHdgValDeg);
-  //Serial1.printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, IMUHdgValDeg);
-  gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, IMUHdgValDeg);
+  if (mSecSinceLastTelemetryUpdate >= TELEMETRY_PRINT_INTERVAL_MSEC)
+  {
+    mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
+    //if (gl_bIsFirstLoopTelemetrySend)
+    //{
+    //  gl_pSerPort->println(LoopTelemStr);
+    //  gl_bIsFirstLoopTelemetrySend = false;
+    //}
+    SendTelemetry();
+  }
+  if (mSecSinceLastTelemetryHeader >= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC)
+  {
+    mSecSinceLastTelemetryHeader -= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC;
+    gl_pSerPort->println(LoopTelemStr);
+  }
 
   delay(200); //08/17/23 put in to make sure distances are current
 }
@@ -2298,7 +2374,7 @@ bool IsDeadBattery()
 //  //Serial.print("rightdist = "); Serial.println(rightdist);
 //
 //  //Step3: Back straight up for long enough to clear side rails
-//#ifndef NO_VL53L0X
+//#ifndef NO_VL53L1X
 //  //12/21/23 MoveToDesiredFrontDistCm() returns FALSE if robot encounters 'mirrored wall' prob
 //  //MoveToDesiredFrontDistCm(70); //70cm is plenty to clear the guide rails
 //  if (!MoveToDesiredFrontDistCm(70))
@@ -2480,7 +2556,7 @@ bool CheckForUserInput()
 
     // say what you got:
     //08/07/26 rev to output debug info on Serial (USB port)
-    Serial.printf("in CheckForUserInput just before call to CheckForUserInput(incomingByte)\n");
+    //Serial.printf("in CheckForUserInput just before call to CheckForUserInput(incomingByte)\n");
 
     //09/27/22 now just call CheckForUserInput(incomingByte)
     retval = CheckForUserInput(incomingByte);
@@ -2489,386 +2565,6 @@ bool CheckForUserInput()
   return retval;//11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary 
 }
 
-//09/17/22 added for use in situations where calling program manages serial input
-//bool CheckForUserInput(char in_char)//11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
-//{
-//  //Purpose: Check for user override
-//  //Inputs: in_char = char object representing user override input
-//  //Outputs: override actions taken.  Returns if 'auto' mode selected
-//  //Notes:
-//  //  09/19/22 copied from CheckUserInput() and modified to accept char argument 
-//  //  09/28/22 'Aa' now causes a processor reboot
-//  //  11/04/23 '*' now causes fcn to return FALSE
-//
-//  //08/09/26 bumped bufflen to accomodate new 'Lnn.nn' and 'Rnn.nn' SpinTurn() commands
-//  //const int bufflen = 3;
-//  const int bufflen = 10;
-//  char buff[bufflen];
-//  memset(buff, 0, bufflen);
-//  byte incomingByte = 0; //moved here 11/21/21
-//  bool retval = true; //11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
-//
-//  buff[0] = in_char; //need to to this as %s only works with char[]
-//  //gl_pSerPort->printf("In CheckForUserInput(%s)\n",buff);
-//  if (in_char != 0)
-//  {
-//    //gl_pSerPort->printf("%lu: In CheckForUserInput() just before switch() with in_char = %c\n", (uint32_t)gl_ElapsedRunMillisec, in_char);
-//    switch (in_char)
-//    {
-//    case 0x55: //ASCII 'U'
-//    case 0x75: //ASCII 'u'
-//#pragma region FIRMWARE_UPDATE_MAIN
-//            StopBothMotors();
-//            gl_pSerPort->printf(F("Start Program Update - Send new HEX file!"));
-//      
-//            //09/20/21 copied from FlasherX - loop()
-//            if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
-//            {
-//              gl_pSerPort->printf("unable to create buffer\n"); Serial.flush();
-//      
-//              for (;;) {}
-//            }
-//      
-//            gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
-//              buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
-//              buffer_addr, buffer_addr + buffer_size);
-//      
-//            //09/20/21 clear the serial buffer
-//            while (gl_pSerPort->available())
-//            {
-//              gl_pSerPort->read();
-//            }
-//      
-//            // receive hex file via serial, write new firmware to flash, clean up, reboot
-//            //update_firmware(&Serial1, buffer_addr, buffer_size); // no return if success
-//            update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size); // no return if success
-//      
-//            // return from update_firmware() means error or user abort, so clean up and
-//            // reboot to ensure that static vars get boot-up initialized before retry
-//            gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
-//            firmware_buffer_free(buffer_addr, buffer_size);
-//            Serial1.flush();
-//            
-//
-//            REBOOT;
-//#pragma endregion FIRMWARE_UPDATE_MAIN //doesn't return
-//      break;
-//    case 0x43: //ASCII 'C'
-//    case 0x63: //ASCII 'c'
-//#pragma region COMMAND_MODE
-//      gl_pSerPort->printf("%lu: At top of COMMAND_MODE Case\n", (uint32_t)gl_ElapsedRunMillisec);
-//      gl_pSerPort->printf(F("ENTERING COMMAND MODE:\n"));
-//      gl_pSerPort->printf(F("0 = 180 deg CCW Turn\n"));
-//      gl_pSerPort->printf(F("1 = 180 deg CW Turn\n"));
-//      //gl_pSerPort->println(F("A = Back to Auto Mode"));
-//      gl_pSerPort->println(F("A = Abort - Reboots Processor"));//rev 09/27/22
-//      //gl_pSerPort->printf(F("S = Stop\n"));//c/o 05/08/23
-//      gl_pSerPort->printf(F("/ = Forward\n"));
-//      gl_pSerPort->printf(F(".(dot) = Reverse\n"));
-//      gl_pSerPort->printf(F("* = Exit ChkForUserInput()\n"));
-//      gl_pSerPort->printf(F("\n"));
-//      gl_pSerPort->printf(F("       Faster\n"));
-//      gl_pSerPort->printf(F("\t8\n"));
-//      gl_pSerPort->printf(F("Left 4\t5  6 Right\n"));
-//      gl_pSerPort->printf(F("\t2\n"));
-//      gl_pSerPort->printf(F("       Slower\n"));
-//
-//      //gl_pSerPort->printf("%lu: Just before StopBothMotors()\n", (uint32_t)gl_ElapsedRunMillisec);
-//      StopBothMotors();
-//      int speed = 0;
-//      //gl_pSerPort->printf("Just before while (gl_pSerPort->available())\n");
-//
-//      //int res = gl_pSerPort->available();
-//      //int res = Serial.available();
-//      //gl_pSerPort->printf("gl_pSerPort->available() returned %d\n", res);
-//
-//      // Prefer Serial1 (Pi5), but also accept commands from USB Serial
-//      Stream* cmdPort = nullptr;
-//
-//      if (Serial1.available() > 0) 
-//      {
-//        cmdPort = &Serial1;
-//      }
-//      else if (Serial.available() > 0) 
-//      {
-//        cmdPort = &Serial;
-//      }
-//
-//      if (cmdPort != nullptr)
-//      {
-//        while (cmdPort->available())
-//        {
-//          incomingByte = cmdPort->read();
-//          //cmdPort->printf("%lu: I removed 0X%X from serial port\n",millis(), incomingByte);
-//          //delay(200);
-//        }
-//      }
-//
-//      //gl_pSerPort->printf("Just after while (gl_pSerPort->available())\n");
-//      incomingByte = 0;
-//      bool bDone = false;//added 11/04/23 to implement user-controlled exit
-//
-//      //while (1) //09/27/22 removed bAutoMode check - now 'Aa' reboots processor
-//      while (!bDone) //09/27/22 removed bAutoMode check - now 'Aa' reboots processor
-//      {
-//        //12/25/21 now using Stream* for serial
-//        //if (gl_pSerPort->available() > 0)
-//        //{
-//        //  // read the incoming bytes:
-//        //  gl_pSerPort->readBytesUntil('\n', buff, sizeof(buff)); //08/10/26 this fills 'buff' with entire 'L/Rnn.nn' string
-//        //  incomingByte = buff[0];
-//
-//        //  // say what you got:
-//        //  gl_pSerPort->printf("I received %s\n", buff);
-//
-//        //  //clear out any remaining chars
-//        //  while (gl_pSerPort->available())
-//        //  {
-//        //    gl_pSerPort->read();
-//        //    //gl_pSerPort->printf("I removed 0X%X from Serial1\n", incomingByte);
-//        //    //gl_pSerPort->printf("%lu: I removed 0X%X from Serial1\n", (uint32_t)gl_ElapsedRunMillisec, incomingByte);
-//        //  }
-//
-//        if (cmdPort != nullptr && cmdPort->available() > 0)
-//        {
-//          // read the incoming bytes:
-//          cmdPort->readBytesUntil('\n', buff, sizeof(buff)); //08/10/26 this fills 'buff' with entire 'L/Rnn.nn' string
-//          incomingByte = buff[0];
-//
-//          // say what you got:
-//          gl_pSerPort->printf("I received %s\n", buff);
-//
-//          //clear out any remaining chars
-//          while (cmdPort != nullptr && cmdPort->available())
-//          {
-//            cmdPort->read();
-//            //gl_pSerPort->printf("I removed 0X%X from Serial1\n", incomingByte);
-//            //gl_pSerPort->printf("%lu: I removed 0X%X from Serial1\n", (uint32_t)gl_ElapsedRunMillisec, incomingByte);
-//          }
-//
-//        }
-//
-//        //08/07/26 added to allow Pi5 to inject characters
-//        //else if (Serial1.available() > 0)
-//        if (cmdPort != nullptr && cmdPort->available() > 0)
-//        {
-//          // read the incoming bytes:
-//          cmdPort->readBytesUntil('\n', buff, sizeof(buff));//08/10/26 this fills 'buff' with entire 'L/Rnn.nn' string
-//          incomingByte = buff[0];
-//
-//          // say what you got:
-//          gl_pSerPort->printf("I received %s on serial port\n", buff);
-//
-//          //clear out any remaining chars
-//          //while (Serial1.available())
-//          //{
-//          //  Serial1.read();
-//          //}
-//
-//          while (cmdPort != nullptr && cmdPort->available())
-//          {
-//            cmdPort->read();
-//          }
-//        }
-//
-//
-//        //11/21/21 incomingByte can come from either serial input
-//        if (incomingByte != 0)
-//        {
-//          //gl_pSerPort->printf("%lu: Top of Switch Statement\n", (uint32_t)gl_ElapsedRunMillisec);
-//          switch (incomingByte)
-//          {
-//            //08/09/26 added 'L' & 'R' commands for arbitrary SpinTurn amounts
-//            //08/10/26 at this point 'buff' holds entire 'L/Rnn.nn' string
-//          case 'L':   // or case 0x4C
-//          case 'R':
-//          {
-//            gl_pSerPort->printf(F("In R/L Case with incomingByte = %c\n"), incomingByte);
-//
-//            // If you are switching on a variable named `incomingByte`then
-//            bool b_ccw = (incomingByte == 'L');
-//
-//            char numBuf[16] = {}; //this will hold 'L/R' string minus the 'L' or 'R'
-//            //strncpy(numBuf, &buff[1], strlen(buff) - 1);
-//            strncpy(numBuf, &buff[1], 5);
-//            numBuf[5] = '\n';
-//
-//            gl_pSerPort->printf(F("In R/L Case with b_ccw = %s numBuf = %s\n"), b_ccw? "CW":"CCW", numBuf);
-//
-//            float degrees = 0.0f;
-//            float rate = DEFAULT_TURN_RATE_DEGPERSEC;   //default is 30 deg/s 
-//
-//            // Parse "30.55" or "30.55,45"
-//            int parsed = sscanf(numBuf, "%f,%f", &degrees, &rate);
-//
-//            if (parsed >= 1 && degrees > 0.05f && degrees <= 360.0f)
-//            {
-//              gl_pSerPort->printf(F("%s %.2f deg @ %.1f deg/s\n"),
-//                b_ccw ? "CCW" : "CW", degrees, rate);
-//
-//              SpinTurn(b_ccw, degrees, rate);
-//
-//              if (gl_bIsForwardDir)
-//                MoveAhead(speed, speed);
-//              else
-//                MoveReverse(speed, speed);
-//            }
-//            else
-//            {
-//              gl_pSerPort->printf(F("Bad turn argument: '%s'\n"), buff);
-//            }
-//          }
-//          break;
-//          case 0x30: //Dec '0'
-//            gl_pSerPort->printf(F("CCW 180 deg Turn\n"));
-//            SpinTurn(true, 180, 90);
-//            MoveAhead(speed, speed);
-//            break;
-//          case 0x31: //Dec '1'
-//            gl_pSerPort->printf(F("CW 180 deg Turn\n"));
-//            SpinTurn(false, 180, 45);
-//            break;
-//          case 0x34: //Turn left 10 deg and keep moving
-//            //gl_pSerPort->printf("%lu: In CCW 10 deg turn block\n", (uint32_t)gl_ElapsedRunMillisec);
-//            gl_pSerPort->printf(F("CCW 10 deg Turn\n"));
-//            SpinTurn(true, 10, 30);
-//
-//            if (gl_bIsForwardDir)
-//            {
-//              MoveAhead(speed, speed);
-//            }
-//            else
-//            {
-//              MoveReverse(speed, speed);
-//            }
-//            break;
-//          case 0x36: //Turn right 10 deg and keep moving
-//            //gl_pSerPort->print("CW 10 deg Turn\n");
-//            gl_pSerPort->printf(F("CW 10 deg Turn\n"));
-//            SpinTurn(false, 10, 30);
-//
-//            //added 05/03/20
-//            if (gl_bIsForwardDir)
-//            {
-//              MoveAhead(speed, speed);
-//            }
-//            else
-//            {
-//              MoveReverse(speed, speed);
-//            }
-//            break;
-//          case 0x38: //Speed up 
-//            speed += 50;
-//            speed = (speed >= MOTOR_SPEED_MAX) ? MOTOR_SPEED_MAX : speed;
-//            //gl_pSerPort->printf("Speeding up: speed now %d\n", speed);
-//            if (gl_bIsForwardDir)
-//            {
-//              MoveAhead(speed, speed);
-//            }
-//            else
-//            {
-//              MoveReverse(speed, speed);
-//            }
-//            break;
-//          case 0x32: //Slow down 
-//            speed -= 50;
-//            speed = (speed < 0) ? 0 : speed;
-//            //gl_pSerPort->printf("Slowing down: speed now %d\n", speed);
-//            if (gl_bIsForwardDir)
-//            { 
-//              MoveAhead(speed, speed);
-//            }
-//            else
-//            {
-//              MoveReverse(speed, speed);
-//            }
-//            break;
-//          case 0x35: //05/07/20 changed to use '5' vs 'S'
-//            //gl_pSerPort->println(F("Stopping Motors!"));
-//            StopBothMotors();
-//            speed = 0;
-//            break;
-//            //case 0x41: //ASCII 'A'
-//            //case 0x61: //ASCII 'a'
-//            //  StopBothMotors();
-//
-//            //  //09/27/22 rev to execute soft reboot
-//            //  gl_pSerPort->printf(F("Received 'A' or 'a' - Rebooting in 1 second...\n"));
-//            //  delay(1000);
-//            //  REBOOT;
-//            //  break;
-//          case 0x2E: //ASCII '.' (dot)
-//            gl_pSerPort->printf(F("Setting both motors to reverse\n"));
-//            gl_bIsForwardDir = false;
-//            MoveReverse(speed, speed);
-//            break;
-//            //case 0x46: //ASCII 'F'
-//            //case 0x66: //ASCII 'f'
-//          case 0x2F: //ASCII '/'
-//            gl_pSerPort->printf(F("Setting both motors to forward\n"));
-//            gl_bIsForwardDir = true;
-//            MoveAhead(speed, speed);
-//#pragma endregion COMMAND_MODE //only returns for 'a' (auto) input
-//            break;
-//
-//            //01/11/22 copied here from main switch statement to allow firmware updates
-//            //even when in 'command' mode
-//          case 0x55: //ASCII 'U'
-//          case 0x75: //ASCII 'u'
-//#pragma region FIRMWARE UPDATE
-//            StopBothMotors();
-//            gl_pSerPort->printf(F("Start Program Update - Send new HEX file!\n"));
-//
-//            //09/20/21 copied from FlasherX - loop()
-//            if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
-//            {
-//              gl_pSerPort->printf("unable to create buffer\n"); Serial.flush();
-//
-//              for (;;) {}
-//            }
-//
-//            gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
-//              buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
-//              buffer_addr, buffer_addr + buffer_size);
-//
-//            //09/20/21 clear the serial buffer
-//            while (gl_pSerPort->available())
-//            {
-//              gl_pSerPort->read();
-//            }
-//
-//            // receive hex file via serial, write new firmware to flash, clean up, reboot
-//            //update_firmware(&Serial1, buffer_addr, buffer_size); // no return if success
-//            update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size); // no return if success
-//
-//
-//            // return from update_firmware() means error or user abort, so clean up and
-//            // reboot to ensure that static vars get boot-up initialized before retry
-//            gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
-//            firmware_buffer_free(buffer_addr, buffer_size);
-//            Serial1.flush();
-//            REBOOT;
-//#pragma endregion FIRMWARE UPDATE  //doesn't return
-//            break;
-//          case 0x2A: //ASCII '*' //11/04/23 added to force FALSE return
-//            gl_pSerPort->printf(F("Exiting ChkForUserInput()\n"));
-//            StopBothMotors();
-//            bDone = true;
-//            retval = false;
-//            break;
-//          default:
-//            gl_pSerPort->printf(F("In Default Case: Stopping Motors!\n"));
-//            StopBothMotors();
-//          }
-//          incomingByte = 0;
-//        }
-//      }
-//      gl_pSerPort->printf(F("Exited  'while (!bDone)'\n"));
-//    }
-//  }
-//  //gl_pSerPort->printf("Returning from 'CheckForUserInput()' with retval = %s\n", retval? "TRUE" : "FALSE");
-//  return retval;
-//}
 bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
 {
   // Purpose: Check for user override
@@ -2990,6 +2686,12 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
           {
             cmdPort->read();
           }
+        }
+
+        if (mSecSinceLastTelemetryUpdate >= TELEMETRY_PRINT_INTERVAL_MSEC)
+        {
+          mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
+          //SendTelemetry();
         }
 
         if (incomingByte != 0)
@@ -4158,6 +3860,152 @@ float GetVoltage(uint8_t volt_pin)
   //}
   //DEBUG!!
   return calc_volts;
+}
+
+void InitRearDistArray()
+{
+  //04/01/15 initialize 'stuck detection' arrays
+  //06/17/20 re-wrote for better readability
+  // 02/28/22 dumped orig version, ported InitFrontDistArray() & changed 'Front' to 'Rear' everywhere
+  // 
+  //to ensure var > STUCK_Rear_VARIANCE_THRESHOLD for first Rear_DIST_ARRAY_SIZE loops
+  //array is initialized with sawtooth from 0 to MAX_Rear_DISTANCE_CM
+  //06/12/22 repl gl_Rearmen with local var
+
+  int newval = 0;
+  int bumpval = MAX_REAR_DISTANCE_CM / REAR_DIST_ARRAY_SIZE;
+  bool bgoingUp = true;
+
+  for (int i = 0; i < REAR_DIST_ARRAY_SIZE; i++)
+  {
+    aRearDistCM[i] = newval;
+    //DEBUG!!
+    //gl_pSerPort->printf("i = %d, newval = %d, aRearDistCM[%d] = %d\n", i, newval, i, aRearDistCM[i]);
+    //DEBUG!!
+    if (bgoingUp)
+    {
+      if (newval < MAX_REAR_DISTANCE_CM - bumpval) //don't want newval > MAX_Rear_DISTANCE_CM
+      {
+        newval += bumpval;
+      }
+      else
+      {
+        bgoingUp = false;
+      }
+    }
+    else
+    {
+      if (newval > bumpval) //don't want newval < 0
+      {
+        newval -= bumpval;
+      }
+      else
+      {
+        bgoingUp = true;
+      }
+    }
+  }
+
+  //04/19/19 init gl_Rearmean  & gl_Rearvar to mean/var respectively
+  long sum = 0;
+  for (int i = 0; i < REAR_DIST_ARRAY_SIZE; i++)
+  {
+    sum += aRearDistCM[i]; //adds in rest of values
+  }
+  //gl_Rearmean = (float)sum / (float)REAR_DIST_ARRAY_SIZE;
+  float mean = (float)sum / (float)REAR_DIST_ARRAY_SIZE;
+
+  //	Step2: calc new 'brute force' variance
+  float sumsquares = 0;
+  for (int i = 0; i < REAR_DIST_ARRAY_SIZE; i++)
+  {
+    //sumsquares += (aRearDistCM[i] - gl_Rearmean) * (aRearDistCM[i] - gl_Rearmean);
+    sumsquares += (aRearDistCM[i] - mean) * (aRearDistCM[i] - mean);
+  }
+
+  gl_Rearvar = sumsquares / REAR_DIST_ARRAY_SIZE;
+  //gl_pSerPort->printf("%lu: aRearDistCM Init: mean = %3.2f, gl_Rearvar = %3.2f\n", millis(), mean, gl_Rearvar);
+
+  //DEBUG!!
+  //gl_pSerPort->printf("Initial Rear Distance Array Contents\n");
+  //gl_pSerPort->printf("Idx\tRdist\n");
+  //for (size_t i = 0; i < REAR_DIST_ARRAY_SIZE; i++)
+  //{
+  // gl_pSerPort->printf("%d\t%2.1f\n", i, aRearDistCM[i]);
+  //}
+  //DEBUG!!
+}
+
+
+uint16_t UpdateRearDistanceArray(uint16_t newdistval)
+{
+  //Purpose: Update rear distance distance array
+  //Provenance: 03/07/22
+  //Inputs: 
+  //  newdistance = latest distance value from rear VL53L1X sensor
+  //Outputs:
+  //  all array values shifted down one, and newdistance added to top
+  //  return 'oldestdistance' the value shifted off the bottom. This is needed for variance calcs
+  //Notes:
+  //  03/07/22 copied from UpdateFrontDistanceArray and modified
+  uint16_t oldestDistVal = aRearDistCM[0];
+  for (int i = 0; i < REAR_DIST_ARRAY_SIZE - 1; i++)
+  {
+    aRearDistCM[i] = aRearDistCM[i + 1];
+  }
+  aRearDistCM[REAR_DIST_ARRAY_SIZE - 1] = newdistval;
+
+  return oldestDistVal;
+}
+
+float  CalcBruteRearDistArrayVariance()
+{
+  //Purpose:  Calculate Variance of rear distance array
+  //Inputs: aRearDist = REAR_DIST_ARRAY_SIZE array of uint16_ts representing rear distances
+  //Outputs: Variance of selected array
+  //Plan:
+  //	Step1: Calculate mean for array
+  //  Step2: calc new 'brute force' variance
+  //Notes:
+  //  05/02/22 copied from PPalace article to re-instate 'brute force' method
+
+//Step1: Calculate mean for array
+  long sum = 0;
+  for (int i = 0; i < REAR_DIST_ARRAY_SIZE; i++)
+  {
+    sum += aRearDistCM[i]; //adds in rest of values
+  }
+  float brute_mean = (float)sum / (float)REAR_DIST_ARRAY_SIZE;
+
+  //Step2: calc new 'brute force' variance
+  float sumsquares = 0;
+  for (int i = 0; i < REAR_DIST_ARRAY_SIZE; i++)
+  {
+    sumsquares += (aRearDistCM[i] - brute_mean) * (aRearDistCM[i] - brute_mean);
+  }
+
+  float brute_var = sumsquares / REAR_DIST_ARRAY_SIZE;
+
+  return brute_var;
+}
+
+
+void SendTelemetry()
+{
+  //added 10/23/20 for rear sensor
+  gl_RearCm = (float)lidar_Rear.read() / 10.0;
+  //gl_pSerPort->printf("gl_RearCm = %2.2f\n", gl_RearCm);
+  UpdateRearDistanceArray(gl_RearCm);
+  float rearVar = CalcBruteRearDistArrayVariance();
+  //gl_pSerPort->printf("gl_RearCm = %2.2f, CalcBruteRearDistArrayVariance() returned %2.2f\n", gl_RearCm, rearVar);
+  float BattV = GetVoltage(SW_BATT_VOLT_PIN);
+  float TopI = GetAmps(I_TOP_PIN);
+  float BotI = GetAmps(I_BOT_PIN);
+  float ChgI = GetAmps(I_CHG_PIN);
+  UpdateIMUHdgValDeg(); //updates IMUHdgValDeg
+
+  //gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, IMUHdgValDeg);
+  gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, rearVar, IMUHdgValDeg);
 }
 
 #pragma endregion MISCELLANEOUS
