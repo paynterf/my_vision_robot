@@ -1,0 +1,17 @@
+[Unit]
+Description=WallE_5 in tmux (serial, camera, auto-nav + telemetry pane)
+After=network-online.target walle-vision.service
+Wants=walle-vision.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/my_vision_robot
+ExecStartPre=/bin/sleep 8
+ExecStart=/home/pi/my_vision_robot/deploy/start-walle-tmux.sh
+ExecStop=/bin/bash -lc 'tmux kill-session -t walle 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target

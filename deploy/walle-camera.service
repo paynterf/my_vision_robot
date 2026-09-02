@@ -1,0 +1,18 @@
+[Unit]
+Description=WallE camera pipeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/my_vision_robot
+ExecStart=/bin/bash /home/pi/my_vision_robot/software/scripts/restart_camera.sh
+# Dependents wait until this sleep finishes (pipeline usually "Camera ready" by then)
+ExecStartPost=/bin/sleep 10
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

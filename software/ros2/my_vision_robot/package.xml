@@ -8,7 +8,9 @@
   <license>TODO: License declaration</license>
 
   <depend>launch_ros</depend>
+  <depend>std_msgs</depend> 
   <depend>rclpy</depend>
+  <depend>my_vision_robot_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
