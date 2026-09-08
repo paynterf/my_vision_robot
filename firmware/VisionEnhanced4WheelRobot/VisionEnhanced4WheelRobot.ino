@@ -642,12 +642,12 @@ void setup()
   lidar_Rear.setMeasurementTimingBudget(50000);
   lidar_Rear.startContinuous(50);
 
+#endif // NO_VL53L1X
   gl_pSerPort->printf(F("Initializing Rear Distance Array..."));
   InitRearDistArray();
   gl_pSerPort->println(F("Done"));
 
 
-#endif // NO_VL53L1X
 
 #pragma endregion REAR LIDAR
 
@@ -2742,7 +2742,8 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
           // Fixed 180° turns
           //-------------------------------------------------
           case '0':
-            gl_pSerPort->printf(F("CCW 180 deg Turn\n"));
+            //gl_pSerPort->printf(F("CCW 180 deg Turn\n"));
+            gl_pSerPort->printf(F("%lu: CCW 180 deg Turn\n"), millis());
             SpinTurn(true, 180, 90);
             if (gl_bIsForwardDir)
             {
@@ -2755,7 +2756,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             break;
 
           case '1':
-            gl_pSerPort->printf(F("CW 180 deg Turn\n"));
+            gl_pSerPort->printf(F("%lu: CW 180 deg Turn\n"), millis());
             SpinTurn(false, 180, 45);
             if (gl_bIsForwardDir)
             {
@@ -2771,7 +2772,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             // 10° nudge turns
             //-------------------------------------------------
           case '4':   // Left / CCW
-            gl_pSerPort->printf(F("CCW 10 deg Turn\n"));
+            gl_pSerPort->printf(F("%lu: CCW 10 deg Turn\n"), millis());
             SpinTurn(true, 10, 30);
             if (gl_bIsForwardDir)
             {
@@ -2784,7 +2785,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             break;
 
           case '6':   // Right / CW
-            gl_pSerPort->printf(F("CW 10 deg Turn\n"));
+            gl_pSerPort->printf(F("%lu: CW 10 deg Turn\n"), millis());
             SpinTurn(false, 10, 30);
             if (gl_bIsForwardDir)
             {
@@ -2805,7 +2806,8 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             {
               speed = MOTOR_SPEED_MAX;
             }
-            gl_pSerPort->printf(F("Speed now %d\n"), speed);
+            //gl_pSerPort->printf(F("Speed now %d\n"), speed);
+            gl_pSerPort->printf(F("%lu: Speed now %d\n"), millis(), speed);
             if (gl_bIsForwardDir)
             {
               MoveAhead(speed, speed);
@@ -2822,7 +2824,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             {
               speed = 0;
             }
-            gl_pSerPort->printf(F("Speed now %d\n"), speed);
+            gl_pSerPort->printf(F("%lu: Speed now %d\n"), millis(), speed);
             if (gl_bIsForwardDir)
             {
               MoveAhead(speed, speed);
@@ -2834,7 +2836,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             break;
 
           case '5':   // Stop
-            gl_pSerPort->printf(F("Stopping Motors\n"));
+            gl_pSerPort->printf(F("%lu: Stopping Motors\n"), millis());
             StopBothMotors();
             speed = 0;
             break;
@@ -2843,13 +2845,13 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             // Direction
             //-------------------------------------------------
           case '.':   // Reverse
-            gl_pSerPort->printf(F("Setting both motors to reverse\n"));
+            gl_pSerPort->printf(F("%lu: Setting both motors to reverse\n"), millis());
             gl_bIsForwardDir = false;
             MoveReverse(speed, speed);
             break;
 
           case '/':   // Forward
-            gl_pSerPort->printf(F("Setting both motors to forward\n"));
+            gl_pSerPort->printf(F("%lu: Setting both motors to forward\n"), millis());
             gl_bIsForwardDir = true;
             MoveAhead(speed, speed);
             break;
@@ -2966,10 +2968,6 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
   //gl_pSerPort->printf("In SpinTurn(%s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
   //  b_ccw == TURNDIR_CCW ? "CCW" : "CW", numDeg, degPersec,
   //  TurnRate_Kp, TurnRate_Ki, TurnRate_Kd);
-  gl_pSerPort->printf("In SpinTurn(%s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
-    b_ccw == TURNDIR_CCW ? "CCW" : "CW", numDeg, degPersec,
-    TurnRate_Kp, TurnRate_Ki, TurnRate_Kd);
-
   //DEBUG!!
 
   //no need to continue if the IMU isn't available
@@ -3993,10 +3991,15 @@ float  CalcBruteRearDistArrayVariance()
 void SendTelemetry()
 {
   //added 10/23/20 for rear sensor
+#ifdef VL53L1X
   gl_RearCm = (float)lidar_Rear.read() / 10.0;
   //gl_pSerPort->printf("gl_RearCm = %2.2f\n", gl_RearCm);
   UpdateRearDistanceArray(gl_RearCm);
   float rearVar = CalcBruteRearDistArrayVariance();
+#else
+  float rearVar = 0;
+#endif // !VL53L1X
+
   //gl_pSerPort->printf("gl_RearCm = %2.2f, CalcBruteRearDistArrayVariance() returned %2.2f\n", gl_RearCm, rearVar);
   float BattV = GetVoltage(SW_BATT_VOLT_PIN);
   float TopI = GetAmps(I_TOP_PIN);
