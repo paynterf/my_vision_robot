@@ -46,7 +46,9 @@ TELEMETRY_LOG_MAX_DAYS = 30
 # Navigation (clearest-direction)
 NAV_TOPIC = "/clearest_direction"
 NAV_COMMAND_INTERVAL_SEC = 0.8
-NAV_DEADBAND_DEG = 6.0
+NAV_DEADBAND_DEG = 15.0   # was 6.0; includes 0° and ±10° (12:00, 11:00, 1:00)
+NAV_MAX_SPEED_INCREMENT = 1.0 #added 09/03/26
+
 
 # Startup / auto-nav (default = drive; C = manual override)
 AUTO_NAV_ON_START = True
@@ -64,6 +66,7 @@ nav_node = None
 last_nav_cmd_time = 0.0
 last_nav_cmd_sent = None
 latest_clearest = None
+last_speed_increment = 0
 
 # ----------------------------------------------------------------------
 # Utility
@@ -404,8 +407,11 @@ def apply_nav_from_latest():
     """
     Translate latest ClearestDirection into Teensy command-mode chars.
     Call periodically from main loop while nav_enabled.
+
+    Speed-up ('8') only in deadband, and only once per stop.
+    Repeated 4/6 are allowed so a corridor can accumulate heading.
     """
-    global last_nav_cmd_time, last_nav_cmd_sent
+    global last_nav_cmd_time, last_nav_cmd_sent, last_speed_increment
 
     if not nav_enabled or latest_clearest is None:
         return
@@ -420,12 +426,32 @@ def apply_nav_from_latest():
     turn_deg = float(msg.turn_deg)
     depth = float(msg.best_depth_mm)
     status = int(msg.status)
+    in_deadband = abs(turn_deg) < NAV_DEADBAND_DEG
+
+    log(
+        f"NAV dbg turn={turn_deg:.1f} status={status} "
+        f"dead={in_deadband} latch={last_speed_increment} depth={depth:.0f}"
+    )
+
+    cmd = None
+    reason = ""
 
     # status: 0=OK, 1=TOO_CLOSE, 2=NO_VALID_DATA
     if status == 1 or status == 2:
         cmd = "5"
+        last_speed_increment = 0
         reason = f"stop (status={status}, depth={depth:.0f} mm)"
-    elif abs(turn_deg) < NAV_DEADBAND_DEG:
+    elif in_deadband and last_speed_increment == 0:
+        cmd = "8"
+        last_speed_increment = 1
+        reason = (
+            f"deadband speed-up (turn_deg={turn_deg:.1f}, depth={depth:.0f} mm)"
+        )
+    elif in_deadband:
+        log(
+            f"NAV hold (deadband turn={turn_deg:.1f}, "
+            f"latch={last_speed_increment}, depth={depth:.0f})"
+        )
         return
     elif turn_deg < 0:
         cmd = "4"  # 10° CCW
@@ -434,14 +460,13 @@ def apply_nav_from_latest():
         cmd = "6"  # 10° CW
         reason = f"right (turn_deg={turn_deg:.1f})"
 
-    if cmd == last_nav_cmd_sent and cmd != "5":
+    if cmd is None:
         return
 
     send_raw(cmd)
     last_nav_cmd_time = now
     last_nav_cmd_sent = cmd
-    log(f"NAV → {cmd}  ({reason})")
-
+    log(f"NAV → {cmd}  ({reason})")    
 def enter_manual_mode(reason: str = "manual override"):
     """Stop autonomous nav and halt motors. C / manual uses this."""
     global nav_enabled, last_nav_cmd_sent
@@ -552,20 +577,20 @@ def main():
     ota_thread = threading.Thread(target=ota_watcher_loop, daemon=True)
     ota_thread.start()
 
-    # 6. Default = AUTO after checks; C = manual override
-    threading.Thread(target=try_auto_nav, daemon=True).start()
-
-    log("Ready – auto-nav will start after checks (C = manual override)")
-    print("Type 'help' for commands. C = manual, auto = resume nav.\n")
-
-    time.sleep(2.5)
-    print("> ", end="", flush=True)
-
-    # 7. Interactive loop (CheckForManualOverride + apply auto-nav)
+    # 6. Wait for Enter, then AUTO (temporary)
     has_tty = sys.stdin.isatty()
     if not has_tty:
-        log("No TTY – running headless (auto-nav only; no keyboard commands)")
+        log("No TTY – not starting auto-nav (no way to confirm or override)")
+    else:
+        input("Press Enter to start navigating...")
+        threading.Thread(target=try_auto_nav, daemon=True).start()
+        log("Ready – auto-nav will start after checks (C = manual override)")
 
+    print("Type 'help' for commands. C = manual, auto = resume nav.\n")
+    if has_tty:
+        print("> ", end="", flush=True)
+
+    # 7. Interactive loop (CheckForManualOverride + apply auto-nav)
     while True:
         user = ""
         try:
