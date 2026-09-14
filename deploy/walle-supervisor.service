@@ -1,17 +1,18 @@
 [Unit]
-Description=WallE_5 in tmux (serial, camera, auto-nav + telemetry pane)
+Description=WallE_5 supervisor (serial, camera, auto-nav)
 After=network-online.target walle-vision.service
 Wants=walle-vision.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
 User=pi
 Group=pi
 WorkingDirectory=/home/pi/my_vision_robot
+Environment=HOME=/home/pi
 ExecStartPre=/bin/sleep 8
-ExecStart=/home/pi/my_vision_robot/deploy/start-walle-tmux.sh
-ExecStop=/bin/bash -lc 'tmux kill-session -t walle 2>/dev/null || true'
+ExecStart=/bin/bash -lc 'source /home/pi/my_vision_robot/software/ros2/install/setup.bash && python3 /home/pi/my_vision_robot/software/scripts/WallE_5.py'
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

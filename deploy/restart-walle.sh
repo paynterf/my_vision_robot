@@ -1,9 +1,20 @@
 #!/bin/bash
+# Bounce WallE_5 only. Camera and vision stay running.
 set -e
-python3 -m py_compile /home/pi/my_vision_robot/software/scripts/WallE_5.py
-tmux send-keys -t walle "5" Enter
-sleep 0.3
-tmux send-keys -t walle C-c
+
+echo "Stopping supervisor..."
+sudo systemctl stop walle-supervisor.service 2>/dev/null || true
+tmux kill-session -t walle 2>/dev/null || true
+pkill -f WallE_5.py 2>/dev/null || true
 sleep 1
-tmux send-keys -t walle "python3 /home/pi/my_vision_robot/software/scripts/WallE_5.py" Enter
-echo "WallE_5 restarted in tmux session 'walle'"
+
+echo "Installing unit (if you edited it)..."
+sudo cp ~/my_vision_robot/deploy/walle-supervisor.service /etc/systemd/system/
+sudo systemctl daemon-reload
+
+echo "Starting supervisor..."
+sudo systemctl start walle-supervisor.service
+
+echo
+systemctl is-active walle-supervisor.service
+echo "  Run tail -f ~/my_vision_robot/logs/walle.log"

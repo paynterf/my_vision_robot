@@ -39,9 +39,14 @@ OTA_POLL_INTERVAL = 1.0          # seconds
 MIN_HEX_SIZE    = 50000          # bytes
 MAX_AGE_SECONDS = 300            # 5 minutes
 
-# Telemetry log file (for the second terminal)
+# Telemetry log file
 TELEMETRY_LOG = Path.home() / "my_vision_robot/logs/telemetry.log"
-TELEMETRY_LOG_MAX_DAYS = 30
+TELEMETRY_LOG_MAX_DAYS = 3 #open this back up to 30 days if you want to keep more history, but it will take up more space
+SECONDS_PER_DAY = 86400 #24 * 60 * 60
+
+# Nav Activity log file
+WALLE_LOG = Path.home() / "my_vision_robot/logs/walle.log"
+WALLE_LOG_MAX_DAYS = 3 * SECONDS_PER_DAY #open this back up to 30 days if you want to keep more history, but it will take up more space
 
 # Navigation (clearest-direction)
 NAV_TOPIC = "/clearest_direction"
@@ -56,6 +61,18 @@ AUTO_NAV_MIN_WAIT_SEC = 5.0
 AUTO_NAV_REQUIRE_VISION = True
 AUTO_NAV_VISION_TIMEOUT_SEC = 30.0
 
+#09/09/26 Added 'No Data' & 'Too Close' detection window values
+NO_DATA_DETECTION_WINDOW = 3  # frames
+TOO_CLOSE_DETECTION_WINDOW = 3  # frames
+MIN_BACKUP_CLEAR_DIST_CM    = 20  # cm
+MIN_RUN_TO_DAYLIGHT_DIST_CM = 100 # cm
+
+#logging levels
+LOG_NONE = 0
+LOG_INFO = 1
+LOG_VERBOSE = 2
+LOG_LEVEL = LOG_VERBOSE   # <-- the one-line change
+
 # ----------------------------------------------------------------------
 # Globals
 # ----------------------------------------------------------------------
@@ -68,15 +85,31 @@ last_nav_cmd_sent = None
 latest_clearest = None
 last_speed_increment = 0
 
+#09/09/26 Added 'No Data' & 'Too Close' detection window globals
+last_no_data_count = 0
+last_too_close_count = 0
+log_level = LOG_INFO
+
+#09/13/26 Added to prevent nav command lockout after firmware OTA update
+teensy_needs_command_mode = False
+
 # ----------------------------------------------------------------------
 # Utility
 # ----------------------------------------------------------------------
 def timestamp() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
-def log(msg: str):
-    print(f"[{timestamp()}] {msg}")
-
+def log(msg: str, level: int = LOG_INFO) -> None:
+    if level > LOG_LEVEL: #higher number = more verbose
+        return
+    line = f"[{timestamp()}] {msg}"
+    print(line, flush=True)
+    try:
+        WALLE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with WALLE_LOG.open("a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass 
 # ----------------------------------------------------------------------
 # Serial helpers
 # ----------------------------------------------------------------------
@@ -101,7 +134,7 @@ def send_raw(cmd: str):
     if ser and ser.is_open:
         ser.write((cmd.strip() + "\n").encode())
         log(f"TX → {cmd.strip()}")
-
+        
 def send_turn(direction: str, degrees: float, rate: float = None):
     """
     Helper for navigation code.
@@ -139,6 +172,7 @@ def telemetry_loop():
                 except Exception as e:
                     print(f"[telemetry] {e}")
             time.sleep(0.02)# ----------------------------------------------------------------------
+
 # Camera
 # ----------------------------------------------------------------------
 def start_camera():
@@ -186,14 +220,13 @@ def _tee_teensy_line(line: str) -> str:
         pass
     return line
 
-
 def perform_ota_upload(hex_path: Path) -> bool:
     """
     OTA transfer. Caller must have already closed the main serial port.
     On success, leaves global ser OPEN (same port used for the upload).
     On failure, closes the OTA port.
     """
-    global ser
+    global ser, teensy_needs_command_mode
 
     log("=== OTA Upload Started ===")
     log(f"File: {hex_path}")
@@ -295,6 +328,7 @@ def perform_ota_upload(hex_path: Path) -> bool:
                 time.sleep(2)
 
         success = True
+        teensy_needs_command_mode = True #added 09/13/26 to prevent nav command lockout after firmware OTA update
         return True
 
     except Exception as e:
@@ -386,11 +420,9 @@ class ClearestDirectionSubscriber(Node):
         global latest_clearest
         latest_clearest = msg
 
-
 def ros_spin_thread():
     global nav_node
     rclpy.spin(nav_node)
-
 
 def start_ros_subscriber():
     """Init rclpy and start subscriber node in a background thread."""
@@ -402,7 +434,6 @@ def start_ros_subscriber():
     t.start()
     log(f"ROS subscriber started on {NAV_TOPIC}")
 
-
 def apply_nav_from_latest():
     """
     Translate latest ClearestDirection into Teensy command-mode chars.
@@ -410,8 +441,10 @@ def apply_nav_from_latest():
 
     Speed-up ('8') only in deadband, and only once per stop.
     Repeated 4/6 are allowed so a corridor can accumulate heading.
+    D-steps are WallE delays — never sent to the Teensy.
     """
     global last_nav_cmd_time, last_nav_cmd_sent, last_speed_increment
+    global last_no_data_count, last_too_close_count
 
     if not nav_enabled or latest_clearest is None:
         return
@@ -421,6 +454,7 @@ def apply_nav_from_latest():
     now = time.time()
     if (now - last_nav_cmd_time) < NAV_COMMAND_INTERVAL_SEC:
         return
+    last_nav_cmd_time = now
 
     msg = latest_clearest
     turn_deg = float(msg.turn_deg)
@@ -428,45 +462,81 @@ def apply_nav_from_latest():
     status = int(msg.status)
     in_deadband = abs(turn_deg) < NAV_DEADBAND_DEG
 
-    log(
-        f"NAV dbg turn={turn_deg:.1f} status={status} "
-        f"dead={in_deadband} latch={last_speed_increment} depth={depth:.0f}"
-    )
+    match status:
+        case 2:  # NO_VALID_DATA
+            last_no_data_count += 1
+            if last_no_data_count < NO_DATA_DETECTION_WINDOW:
+                return
+            last_no_data_count = 0
+            last_speed_increment = 0
+            send_nav_seq(
+                [
+                    ("5", "stop"),
+                    ("D1", "delay 1s"),
+                    ("L45", "turn"),
+                    ("R90", "turn"),
+                    ("L45", "turn"),
+                    ("D1", "delay 1s"),
+                    ("8", "run"),
+                ],
+                f"NO_DATA, depth={depth:.0f} mm",
+            )
 
-    cmd = None
-    reason = ""
+        case 1:  # TOO_CLOSE
+            last_too_close_count += 1
+            if last_too_close_count < TOO_CLOSE_DETECTION_WINDOW:
+                return
+            last_too_close_count = 0
+            last_speed_increment = 0
+            send_nav_cmd(
+                "5",
+                f"TOO_CLOSE stop, depth={depth:.0f} mm",
+                force=True,
+            )
+            if depth < (MIN_BACKUP_CLEAR_DIST_CM * 10.0):
+                send_nav_seq(
+                    [
+                        (".", "reverse"),
+                        ("8", "speed up"),
+                        ("D1", "delay 1s"),
+                        ("5", "stop"),
+                    ],
+                    f"TOO_CLOSE backup, depth={depth:.0f} mm",
+                )
+            find_clear_direction()
+            send_nav_cmd("8", "resume after TOO_CLOSE", force=True)
 
-    # status: 0=OK, 1=TOO_CLOSE, 2=NO_VALID_DATA
-    if status == 1 or status == 2:
-        cmd = "5"
-        last_speed_increment = 0
-        reason = f"stop (status={status}, depth={depth:.0f} mm)"
-    elif in_deadband and last_speed_increment == 0:
-        cmd = "8"
-        last_speed_increment = 1
-        reason = (
-            f"deadband speed-up (turn_deg={turn_deg:.1f}, depth={depth:.0f} mm)"
-        )
-    elif in_deadband:
-        log(
-            f"NAV hold (deadband turn={turn_deg:.1f}, "
-            f"latch={last_speed_increment}, depth={depth:.0f})"
-        )
-        return
-    elif turn_deg < 0:
-        cmd = "4"  # 10° CCW
-        reason = f"left (turn_deg={turn_deg:.1f})"
-    else:
-        cmd = "6"  # 10° CW
-        reason = f"right (turn_deg={turn_deg:.1f})"
+        case 0:  # OK
+            last_no_data_count = 0
+            last_too_close_count = 0
 
-    if cmd is None:
-        return
+            if in_deadband and last_speed_increment == 0:
+                last_speed_increment = 1
+                send_nav_cmd(
+                    "8",
+                    f"deadband speed-up (turn_deg={turn_deg:.1f}, depth={depth:.0f} mm)",
+                    force=True,
+                )
+            elif in_deadband:
+                return
+            elif turn_deg < 0:
+                last_speed_increment = 0
+                send_nav_cmd(
+                    "4",
+                    f"left (turn_deg={turn_deg:.1f})",
+                    force=True,
+                )
+            else:
+                last_speed_increment = 0
+                send_nav_cmd(
+                    "6",
+                    f"right (turn_deg={turn_deg:.1f})",
+                    force=True,
+                )
 
-    send_raw(cmd)
-    last_nav_cmd_time = now
-    last_nav_cmd_sent = cmd
-    log(f"NAV → {cmd}  ({reason})")    
+        case _:
+            return
+
 def enter_manual_mode(reason: str = "manual override"):
     """Stop autonomous nav and halt motors. C / manual uses this."""
     global nav_enabled, last_nav_cmd_sent
@@ -506,8 +576,9 @@ def try_auto_nav():
             return
 
     # Enter Teensy command mode once, then enable auto commanding
-    send_raw("C")
-    time.sleep(0.3)
+    # send_raw("C")
+    # time.sleep(0.3)
+    reenter_command_mode("auto-nav startup")
     enter_auto_mode("startup checks passed")
     
 def rotate_telemetry_logs():
@@ -528,7 +599,7 @@ def rotate_telemetry_logs():
 
     TELEMETRY_LOG.write_text("")  # new session file
 
-    cutoff = time.time() - (TELEMETRY_LOG_MAX_DAYS * 86400)
+    cutoff = time.time() - (TELEMETRY_LOG_MAX_DAYS * SECONDS_PER_DAY)
     for p in log_dir.glob("*_telemetry.log"):
         if p.name == TELEMETRY_LOG.name:
             continue
@@ -539,11 +610,73 @@ def rotate_telemetry_logs():
         except OSError as e:
             print(f"Could not delete {p.name}: {e}")
 
+def rotate_nav_logs():
+    """Archive telemetry.log to YYMMDD_HHMM_telemetry.log; prune old archives."""
+    log_dir = NAV_LOG.parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    if NAV_LOG.is_file() and NAV_LOG.stat().st_size > 0:
+        stamp = datetime.now().strftime("%y%m%d_%H%M")
+        archive = log_dir / f"{stamp}_nav.log"
+        # collision in the same minute
+        n = 1
+        while archive.exists():
+            archive = log_dir / f"{stamp}_{n}_nav.log"
+            n += 1
+        NAV_LOG.rename(archive)
+        print(f"Archived previous telemetry to {archive.name}")
+
+    NAV_LOG.write_text("")  # new session file
+
+    cutoff = time.time() - (NAV_LOG_MAX_DAYS * SECONDS_PER_DAY)
+    for p in log_dir.glob("*_nav.log"):
+        if p.name == NAV_LOG.name:
+            continue
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+                print(f"Deleted old nav archive {p.name}")
+        except OSError as e:
+            print(f"Could not delete {p.name}: {e}")
+
+def send_nav_cmd(cmd: str, reason: str,*,force: bool = False):
+    """
+    Send a nav command to the Teensy, but only if it's different from the last one.
+    If force=True, send it regardless of last command.
+    """
+    global last_nav_cmd_sent, last_nav_cmd_time
+    if not force and cmd == last_nav_cmd_sent and cmd != "5":
+        return
+        
+    send_raw(cmd)
+    last_nav_cmd_time = time.time()
+    last_nav_cmd_sent = cmd
+
+    if LOG_LEVEL >= LOG_VERBOSE:
+        log(f"NAV → {cmd}  ({reason})") 
+
+def send_nav_seq(steps, reason):
+    """Run a recovery sequence. Blocks the main loop until done."""
+    log(f"NAV SEQUENCE: {reason}")
+    for cmd, step_reason in steps:
+        send_nav_cmd(cmd, step_reason, force=True)
+        if cmd.strip()[0] not in ("D", "d"):
+            time.sleep(NAV_COMMAND_INTERVAL_SEC)
+
+def reenter_command_mode(reason):
+    global last_speed_increment, last_nav_cmd_sent
+
+    send_raw("C")
+    time.sleep(0.3)
+    last_speed_increment = 0
+    last_nav_cmd_sent = None
+    enter_auto_mode(reason)
+
 # ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 def main():
-    global telemetry_running, nav_enabled, last_nav_cmd_sent
+    global teensy_needs_command_mode, telemetry_running, nav_enabled, last_nav_cmd_sent
 
     print("\n========================================")
     print("       WallE_5 Supervisor Starting")
@@ -552,6 +685,10 @@ def main():
     print(f"Telemetry log: {TELEMETRY_LOG}")
     rotate_telemetry_logs()
     print("In a second terminal run:  tail -f ~/my_vision_robot/logs/telemetry.log\n")
+
+    WALLE_LOG.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Supervisor log: {WALLE_LOG}")
+    print("In another terminal:  tail -f ~/my_vision_robot/logs/walle.log\n")
 
     # 1. Serial
     if not open_serial():
@@ -577,19 +714,17 @@ def main():
     ota_thread = threading.Thread(target=ota_watcher_loop, daemon=True)
     ota_thread.start()
 
-    # 6. Wait for Enter, then AUTO (temporary)
+     # 6. Default = AUTO after checks; C = manual override
     has_tty = sys.stdin.isatty()
-    if not has_tty:
-        log("No TTY – not starting auto-nav (no way to confirm or override)")
-    else:
-        input("Press Enter to start navigating...")
-        threading.Thread(target=try_auto_nav, daemon=True).start()
-        log("Ready – auto-nav will start after checks (C = manual override)")
-
-    print("Type 'help' for commands. C = manual, auto = resume nav.\n")
     if has_tty:
+        input("Press Enter to start navigating...")
+        log("Ready – auto-nav will start after checks (C = manual override)")
+        print("Type 'help' for commands.  C = manual, auto = resume nav.\n")
         print("> ", end="", flush=True)
-
+    else:
+        log("No TTY – keyboard C unavailable; auto-nav starting anyway")
+    threading.Thread(target=try_auto_nav, daemon=True).start()
+    
     # 7. Interactive loop (CheckForManualOverride + apply auto-nav)
     while True:
         user = ""
@@ -601,6 +736,10 @@ def main():
         except (EOFError, KeyboardInterrupt):
             print()
             break
+
+        if teensy_needs_command_mode:
+            teensy_needs_command_mode = False
+            reenter_command_mode("post-OTA")
 
         apply_nav_from_latest()
 
@@ -642,6 +781,12 @@ def main():
     except Exception:
         pass
     if ser and ser.is_open:
+        try:
+            send_raw("5")
+            time.sleep(0.2)
+        except Exception:
+            pass
+        
         ser.close()
     log("Done.")
  

@@ -1,0 +1,7 @@
+{
+  "python-envs.defaultEnvManager": "ms-python.python:system",
+  "python.analysis.extraPaths": [
+    "/home/pi/my_vision_robot/software/ros2/install/my_vision_robot_msgs/lib/python3.12/site-packages"
+  ],
+  "python.languageServer": "Jedi"
+}
