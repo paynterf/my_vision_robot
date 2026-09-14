@@ -24,7 +24,7 @@ extern "C"
 #pragma region DEFINES
 //02/29/16 hardware defines
 //#define HDG_ONLY //added 06/11/23
-//#define NO_MOTORS
+#define NO_MOTORS
 //#define NO_MPU6050 //added 01/23/22
 //#define IR_HOMING_ONLY
 //#define NO_FRONT_LIDAR
@@ -88,8 +88,8 @@ const float VOLTAGE_TO_CURRENT_RATIO = 1.f; //Used for both 'Total' and 'Run' se
 #pragma endregion ADC CONSTANTS
 
 #pragma region TELEMETRYSTRINGS
-//const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearVar\tHdg";
-const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg";
+//const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg";
+const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg\t\tLspd\tRspd";
 const char* IRHomingTelemStr = "Time\tBattV\tFin1\tFin2\tSteer\tPID_Out\t\tLSpd\tRSpd\tFrontD\tRearD";
 const char* IRHomingTelemStrNoPings = "Time\tBattV\tFin1\tFin2\tSteer\tPID_Out\t\tLSpd\tRSpd\n";
 
@@ -338,7 +338,6 @@ float gl_HdgHistoryArray[HEADING_HISTORY_ARRAY_SIZE];
 bool SpinTurn(bool b_ccw, float numDeg, float degPersec = DEFAULT_TURN_RATE_DEGPERSEC);
 
 //06/01/24 chg int gl_Leftspeednum to uint16_t leftspeednum, int gl_Rightspeednum to uint16_t rightspeednum
-//void RunBothMotorsMsec(bool bisFwd, int timeMsec = 500, int gl_Leftspeednum = MOTOR_SPEED_HALF, int gl_Rightspeednum = MOTOR_SPEED_HALF);
 void RunBothMotorsMsec(bool bisFwd, int timeMsec = 500, uint16_t leftspeednum = MOTOR_SPEED_HALF, uint16_t rightspeednum = MOTOR_SPEED_HALF);
 bool RollingTurn(bool b_ccw, bool b_fwd, float numDeg, float Kp, float Ki, float Kd, float degPersec = DEFAULT_TURN_RATE_DEGPERSEC);
 //bool IsChargerConnected(bool curState = false);
@@ -764,7 +763,6 @@ void loop()
 #pragma region MOTOR_SUPPORT
 //09/08/20 modified for DRV8871 motor driver
 //01/06/24 chg int gl_Leftspeednum, int gl_Rightspeednum to uint16_t leftspeednum, uint16_t rightspeednum
-//void MoveReverse(int gl_Leftspeednum, int gl_Rightspeednum)
 void MoveReverse(uint16_t leftspeednum, uint16_t rightspeednum)
 {
   //Purpose:  Move in reverse direction continuously - companion to MoveAhead()
@@ -781,15 +779,12 @@ void MoveReverse(uint16_t leftspeednum, uint16_t rightspeednum)
 
   //Step 1: Set reverse direction and speed for both wheels
 //01/06/24 chg int gl_Leftspeednum, int gl_Rightspeednum to uint16_t leftspeednum, uint16_t rightspeednum
-  //SetLeftMotorDirAndSpeed(REV_DIR, gl_Leftspeednum);
-  //SetRightMotorDirAndSpeed(REV_DIR, gl_Rightspeednum);
   SetLeftMotorDirAndSpeed(REV_DIR, leftspeednum);
   SetRightMotorDirAndSpeed(REV_DIR, rightspeednum);
 }
 
 //09/08/20 modified for DRV8871 motor driver
 //01/06/24 chg int gl_Leftspeednum, int gl_Rightspeednum to uint16_t leftspeednum, uint16_t rightspeednum
-//void MoveAhead(int gl_Leftspeednum, int gl_Rightspeednum)
 void MoveAhead(uint16_t leftspeednum, uint16_t rightspeednum)
 {
   //Purpose:  Move ahead continuously
@@ -808,8 +803,6 @@ void MoveAhead(uint16_t leftspeednum, uint16_t rightspeednum)
 
   //Step 1: Set forward direction and speed for both wheels
 //01/06/24 chg gl_Leftspeednum, gl_Rightspeednum to leftspeednum, rightspeednum
-  //SetLeftMotorDirAndSpeed(true, gl_Leftspeednum);
-  //SetRightMotorDirAndSpeed(true, gl_Rightspeednum);
   SetLeftMotorDirAndSpeed(true, leftspeednum);
   SetRightMotorDirAndSpeed(true, rightspeednum);
 }
@@ -820,13 +813,13 @@ void StopBothMotors()
   StopRightMotors();
 }
 
-//09/08/20 modified for DRV8871 motor driver
 //11/04/21 modified for Pololu VNH5019 motor driver
 void StopLeftMotors()
 {
   digitalWrite(InA_Left, LOW);
   digitalWrite(InB_Left, LOW);
   analogWrite(Spd_Left, MOTOR_SPEED_OFF);
+  gl_Leftspeednum = 0; //added 09/13/26
 }
 
 //11/04/21 modified for Pololu VNH5019 motor driver
@@ -835,11 +828,11 @@ void StopRightMotors()
   digitalWrite(InA_Right, LOW);
   digitalWrite(InB_Right, LOW);
   analogWrite(Spd_Right, MOTOR_SPEED_OFF);
+  gl_Rightspeednum = 0; //added 09/13/26
 }
 
 //09/08/20 added bool bisFwd param for DRV8871 motor driver
 //01/06/24 chg int gl_Leftspeednum, int gl_Rightspeednum to uint16_t leftspeednum, uint16_t rightspeednum
-//void RunBothMotors(bool bisFwd, int gl_Leftspeednum, int gl_Rightspeednum)
 void RunBothMotors(bool bisFwd, uint16_t leftspeednum, uint16_t rightspeednum)
 {
   //Purpose: Run both Motors at left/rightspeednum speeds
@@ -861,8 +854,6 @@ void RunBothMotors(bool bisFwd, uint16_t leftspeednum, uint16_t rightspeednum)
 //DEBUG!!
 
 //01/06/24 chg gl_Leftspeednum, gl_Rightspeednum to leftspeednum, rightspeednum
-  //SetLeftMotorDirAndSpeed(bisFwd, gl_Leftspeednum);
-  //SetRightMotorDirAndSpeed(bisFwd, gl_Rightspeednum);
   SetLeftMotorDirAndSpeed(bisFwd, leftspeednum);
   SetRightMotorDirAndSpeed(bisFwd, rightspeednum);
 }
@@ -925,7 +916,6 @@ void RunBothMotorsMsec(bool bisFwd, int timeMsec, uint16_t leftspeednum, uint16_
   //	09/08/20 added bool bisFwd param for DRV8871 motor driver
 
 //06/01/24 chg gl_Leftspeednum to leftspeednum, gl_Rightspeednum to rightspeednum
-  //RunBothMotors(bisFwd, gl_Leftspeednum, gl_Rightspeednum);
   RunBothMotors(bisFwd, leftspeednum, rightspeednum);
 
   //Step 2: Delay timsec seconds
@@ -971,6 +961,8 @@ void SetLeftMotorDirAndSpeed(bool bIsFwd, uint16_t speed)
     analogWrite(Spd_Left, speed);
 #endif // !NO_MOTORS
   }
+
+  gl_Leftspeednum = speed; //added 09/13/26 for telemetry output
 }
 
 //06/01/24 chg speed signature from 'int' to 'uint16_t'
@@ -982,7 +974,7 @@ void SetRightMotorDirAndSpeed(bool bIsFwd, uint16_t speed)
   //DEBUG!!
 
     //11/04/21 fwd for right motors is CW when looking at shaft
-#ifndef NO_MOTORS
+//#ifndef NO_MOTORS
 
   if (bIsFwd)
   {
@@ -1011,7 +1003,9 @@ void SetRightMotorDirAndSpeed(bool bIsFwd, uint16_t speed)
 #endif // !NO_MOTORS
   }
 
-#endif // !NO_MOTORS
+  gl_Rightspeednum = speed; //added 09/13/26 for telemetry output
+
+//#endif // !NO_MOTORS
 }
 
 //05/05/23 added for symmetry and to simplify IsStuckAhead() code
@@ -2587,6 +2581,8 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
 
   if (in_char != 0)
   {
+    //gl_pSerPort->printf("CheckForUserInput(char %c)\n", in_char);
+
     switch (in_char)
     {
       //---------------------------------------------------------------------
@@ -2648,6 +2644,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
       gl_pSerPort->printf(F(" Slower\n"));
       gl_pSerPort->printf(F("Lxx.x or Rxx.x = SpinTurn xx.x degrees\n"));
       gl_pSerPort->printf(F("Lxx.x,yy or Rxx.x,yy = SpinTurn with custom rate\n"));
+      gl_pSerPort->printf(F("Tddd.d = Turn to heading ddd.d\n"));
 
       StopBothMotors();
       int speed = 0;
@@ -2691,8 +2688,14 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
         if (mSecSinceLastTelemetryUpdate >= TELEMETRY_PRINT_INTERVAL_MSEC)
         {
           mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
-          //SendTelemetry();
+          SendTelemetry();
         }
+        if (mSecSinceLastTelemetryHeader >= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC)
+        {
+          mSecSinceLastTelemetryHeader -= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC;
+          gl_pSerPort->println(LoopTelemStr);
+        }
+
 
         if (incomingByte != 0)
         {
@@ -2734,6 +2737,56 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             else
             {
               gl_pSerPort->printf(F("Bad turn argument: '%s'\n"), buff);
+            }
+          }
+          break;
+
+          //Turn to Heading case
+          case 'T':
+          case 't':
+          {
+            //bool b_ccw = (incomingByte == 'L');
+            char numBuf[16] = { 0 };
+
+            // Copy everything after the L/R
+            strncpy(numBuf, &buff[1], sizeof(numBuf) - 1);
+
+            float hdg_deg = 0.0f;
+
+            int parsed = sscanf(numBuf, "%f,%f", &hdg_deg);
+            if (parsed >= 1 && hdg_deg >= -180.0f && hdg_deg <= 180.0f)
+            {
+              gl_pSerPort->printf(F("Turn to %.2f deg\n"),hdg_deg);
+              TurnToHdgDeg(hdg_deg);
+              float actual = UpdateIMUHdgValDeg();
+              gl_pSerPort->printf(F("Hdg now %2.2f\n"), actual);
+            }
+            else
+            {
+              gl_pSerPort->printf(F("Bad hdg_deg argument: '%s'\n"), buff);
+            }
+          }
+          break;
+
+          case 'D':
+          case 'd':
+          {
+            char numBuf[16] = { 0 };
+
+            // Copy everything after the D/d
+            strncpy(numBuf, &buff[1], sizeof(numBuf) - 1);
+
+            float sec = 0.0f;
+            int parsed = sscanf(numBuf, "%f", &sec);
+
+            if (parsed >= 1 && sec >= 0)
+            {
+              gl_pSerPort->printf(F("delaying %.2f sec\n"), sec);
+              delay(sec * 1000);
+            }
+            else
+            {
+              gl_pSerPort->printf(F("Bad delay argument: '%s'\n"), buff);
             }
           }
           break;
@@ -2806,7 +2859,6 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             {
               speed = MOTOR_SPEED_MAX;
             }
-            //gl_pSerPort->printf(F("Speed now %d\n"), speed);
             gl_pSerPort->printf(F("%lu: Speed now %d\n"), millis(), speed);
             if (gl_bIsForwardDir)
             {
@@ -3144,6 +3196,7 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
       if (bTimedOut)
       {
         //DEBUG!!
+        UpdateIMUHdgValDeg(); //09/13/26 added to make sure IMUHdgValDeg printout value is valid
         gl_pSerPort->printf("timed out with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
         //DEBUG!!
 
@@ -3667,7 +3720,7 @@ uint8_t GetCurrentFIFOPacket(uint8_t* data, uint8_t length, uint16_t max_loops)
 //  return bResult;
 //}
 
-//06/13/23 added to detect 'spinning out of control' conditon
+//06/13/23 added to detect 'spinning out of control' condition
 //bool IsSpinning()
 //{
 //  //Purpose: detect 'spinning' condx
@@ -4005,10 +4058,12 @@ void SendTelemetry()
   float TopI = GetAmps(I_TOP_PIN);
   float BotI = GetAmps(I_BOT_PIN);
   float ChgI = GetAmps(I_CHG_PIN);
+  
   UpdateIMUHdgValDeg(); //updates IMUHdgValDeg
 
-  //gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, IMUHdgValDeg);
-  gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, rearVar, IMUHdgValDeg);
+  //const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg\t\tLspd\tRspd";
+  gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%d\t\t%d\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, rearVar, IMUHdgValDeg, gl_Leftspeednum, gl_Rightspeednum);
+
 }
 
 #pragma endregion MISCELLANEOUS
