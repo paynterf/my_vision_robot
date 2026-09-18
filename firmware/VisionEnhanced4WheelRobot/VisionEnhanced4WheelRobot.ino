@@ -24,7 +24,7 @@ extern "C"
 #pragma region DEFINES
 //02/29/16 hardware defines
 //#define HDG_ONLY //added 06/11/23
-#define NO_MOTORS
+//#define NO_MOTORS
 //#define NO_MPU6050 //added 01/23/22
 //#define IR_HOMING_ONLY
 //#define NO_FRONT_LIDAR
@@ -88,8 +88,8 @@ const float VOLTAGE_TO_CURRENT_RATIO = 1.f; //Used for both 'Total' and 'Run' se
 #pragma endregion ADC CONSTANTS
 
 #pragma region TELEMETRYSTRINGS
-//const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg";
-const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg\t\tLspd\tRspd";
+//const char* LoopTelemHdrStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg";
+const char* LoopTelemHdrStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg\t\tLspd\tRspd";
 const char* IRHomingTelemStr = "Time\tBattV\tFin1\tFin2\tSteer\tPID_Out\t\tLSpd\tRSpd\tFrontD\tRearD";
 const char* IRHomingTelemStrNoPings = "Time\tBattV\tFin1\tFin2\tSteer\tPID_Out\t\tLSpd\tRSpd\n";
 
@@ -728,7 +728,7 @@ void setup()
 
   mSecSinceLastTelemetryHeader = 0;
   mSecSinceLastTelemetryUpdate = 0;
-  gl_pSerPort->println(LoopTelemStr);
+  gl_pSerPort->println(LoopTelemHdrStr);
 }
 
 void loop()
@@ -743,15 +743,15 @@ void loop()
     mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
     //if (gl_bIsFirstLoopTelemetrySend)
     //{
-    //  gl_pSerPort->println(LoopTelemStr);
+    //  gl_pSerPort->println(LoopTelemHdrStr);
     //  gl_bIsFirstLoopTelemetrySend = false;
     //}
-    SendTelemetry();
+    //SendTelemetry();
   }
   if (mSecSinceLastTelemetryHeader >= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC)
   {
     mSecSinceLastTelemetryHeader -= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC;
-    gl_pSerPort->println(LoopTelemStr);
+    gl_pSerPort->println(LoopTelemHdrStr);
   }
 
   delay(200); //08/17/23 put in to make sure distances are current
@@ -2628,6 +2628,9 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
     case 0x63: // 'c'
 #pragma region COMMAND_MODE
     {//needed to avoid "crosses initialization of int speed" compiler error
+      StopBothMotors(); //09/14/26 moved above menu printout
+      int speed = 0;
+
       gl_pSerPort->printf("%lu: At top of COMMAND_MODE Case\n", (uint32_t)gl_ElapsedRunMillisec);
       gl_pSerPort->printf(F("ENTERING COMMAND MODE:\n"));
       gl_pSerPort->printf(F("0 = 180 deg CCW Turn\n"));
@@ -2645,9 +2648,6 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
       gl_pSerPort->printf(F("Lxx.x or Rxx.x = SpinTurn xx.x degrees\n"));
       gl_pSerPort->printf(F("Lxx.x,yy or Rxx.x,yy = SpinTurn with custom rate\n"));
       gl_pSerPort->printf(F("Tddd.d = Turn to heading ddd.d\n"));
-
-      StopBothMotors();
-      int speed = 0;
 
       // Flush any leftover characters on both ports
       while (Serial.available())  Serial.read();
@@ -2688,12 +2688,14 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
         if (mSecSinceLastTelemetryUpdate >= TELEMETRY_PRINT_INTERVAL_MSEC)
         {
           mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
-          SendTelemetry();
+          digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+
+          //SendTelemetry();
         }
         if (mSecSinceLastTelemetryHeader >= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC)
         {
           mSecSinceLastTelemetryHeader -= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC;
-          gl_pSerPort->println(LoopTelemStr);
+          //gl_pSerPort->println(LoopTelemHdrStr);
         }
 
 
@@ -2720,18 +2722,28 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
 
             if (parsed >= 1 && degrees > 0.05f && degrees <= 360.0f)
             {
-              gl_pSerPort->printf(F("%s %.2f deg @ %.1f deg/s\n"),
-                b_ccw ? "CCW" : "CW", degrees, rate);
+              //09/16/26 added for handshaking with WallE_5.py
+              gl_pSerPort->printf(F("ACK %c%.2f deg @ %.1f deg/s\n"),
+                incomingByte, degrees, rate);
 
-              SpinTurn(b_ccw, degrees, rate);
-
-              if (gl_bIsForwardDir)
+              //09/16/26 'if' block added for handshaking with WallE_5.py
+              if (SpinTurn(b_ccw, degrees, rate))
               {
-                MoveAhead(speed, speed);
+                //09/16/26 added for handshaking with WallE_5.py
+                gl_pSerPort->printf(F("DONE %c%.2f deg @ %.1f deg/s\n"),incomingByte, degrees, rate);
+
+                if (gl_bIsForwardDir)
+                {
+                  MoveAhead(speed, speed);
+                }
+                else
+                {
+                  MoveReverse(speed, speed);
+                }
               }
-              else
+              else //09/16/26 added for handshaking with WallE_5.py
               {
-                MoveReverse(speed, speed);
+                gl_pSerPort->printf(F("DONE ABORT %c%.2f deg @ %.1f deg/s\n"),incomingByte, degrees, rate);
               }
             }
             else
@@ -2745,6 +2757,8 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
           case 'T':
           case 't':
           {
+            gl_pSerPort->printf(F("ACK T\n"));
+
             //bool b_ccw = (incomingByte == 'L');
             char numBuf[16] = { 0 };
 
@@ -2753,13 +2767,21 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
 
             float hdg_deg = 0.0f;
 
-            int parsed = sscanf(numBuf, "%f,%f", &hdg_deg);
+            int parsed = sscanf(numBuf, "%f", &hdg_deg);
             if (parsed >= 1 && hdg_deg >= -180.0f && hdg_deg <= 180.0f)
             {
               gl_pSerPort->printf(F("Turn to %.2f deg\n"),hdg_deg);
-              TurnToHdgDeg(hdg_deg);
-              float actual = UpdateIMUHdgValDeg();
-              gl_pSerPort->printf(F("Hdg now %2.2f\n"), actual);
+              //TurnToHdgDeg(hdg_deg);
+              if (TurnToHdgDeg(hdg_deg))
+              {
+                gl_pSerPort->printf(F("DONE T\n"));
+                float actual = UpdateIMUHdgValDeg();
+                gl_pSerPort->printf(F("Hdg now %2.2f\n"), actual);
+              }
+              else
+              {
+                gl_pSerPort->printf(F("DONE ABORT T\n"));
+              }
             }
             else
             {
@@ -2768,6 +2790,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
           }
           break;
 
+          //The 'D' (delay) case is not used as of 9/17/26
           case 'D':
           case 'd':
           {
@@ -2796,28 +2819,49 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
           //-------------------------------------------------
           case '0':
             //gl_pSerPort->printf(F("CCW 180 deg Turn\n"));
-            gl_pSerPort->printf(F("%lu: CCW 180 deg Turn\n"), millis());
-            SpinTurn(true, 180, 90);
-            if (gl_bIsForwardDir)
+            //gl_pSerPort->printf(F("%lu: CCW 180 deg Turn\n"), millis());
+            gl_pSerPort->printf(F("ACK 0\n"));
+
+            if(SpinTurn(true, 180, 90))
             {
-              MoveAhead(speed, speed);
+              gl_pSerPort->printf(F("DONE 0\n"));
+
+              if (gl_bIsForwardDir)
+              {
+                MoveAhead(speed, speed);
+              }
+              else
+              {
+                MoveReverse(speed, speed);
+              }
             }
             else
             {
-              MoveReverse(speed, speed);
+              gl_pSerPort->printf(F("DONE ABORT 0\n"));
+
             }
             break;
 
           case '1':
-            gl_pSerPort->printf(F("%lu: CW 180 deg Turn\n"), millis());
-            SpinTurn(false, 180, 45);
-            if (gl_bIsForwardDir)
+            gl_pSerPort->printf(F("ACK 1\n"));
+
+            if (SpinTurn(false, 180, 90))
             {
-              MoveAhead(speed, speed);
+              gl_pSerPort->printf(F("DONE 1\n"));
+
+              if (gl_bIsForwardDir)
+              {
+                MoveAhead(speed, speed);
+              }
+              else
+              {
+                MoveReverse(speed, speed);
+              }
             }
             else
             {
-              MoveReverse(speed, speed);
+              gl_pSerPort->printf(F("DONE ABORT 1\n"));
+
             }
             break;
 
@@ -2825,29 +2869,61 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             // 10° nudge turns
             //-------------------------------------------------
           case '4':   // Left / CCW
-            gl_pSerPort->printf(F("%lu: CCW 10 deg Turn\n"), millis());
-            SpinTurn(true, 10, 30);
-            if (gl_bIsForwardDir)
+            gl_pSerPort->printf(F("ACK 4\n"));
+
+            if (SpinTurn(false, 10, 30))
             {
-              MoveAhead(speed, speed);
+              gl_pSerPort->printf(F("DONE 4\n"));
+
+              if (gl_bIsForwardDir)
+              {
+                MoveAhead(speed, speed);
+              }
+              else
+              {
+                MoveReverse(speed, speed);
+              }
             }
             else
             {
-              MoveReverse(speed, speed);
+              gl_pSerPort->printf(F("DONE ABORT 4\n"));
+
             }
             break;
 
           case '6':   // Right / CW
-            gl_pSerPort->printf(F("%lu: CW 10 deg Turn\n"), millis());
-            SpinTurn(false, 10, 30);
-            if (gl_bIsForwardDir)
+            //gl_pSerPort->printf(F("%lu: CW 10 deg Turn\n"), millis());
+              //09/16/26 added for handshaking with WallE_5.py
+
+            gl_pSerPort->printf(F("ACK 6\n"));
+
+            if (SpinTurn(false, 10, 30))
             {
-              MoveAhead(speed, speed);
+              gl_pSerPort->printf(F("DONE 6\n"));
+
+              if (gl_bIsForwardDir)
+              {
+                MoveAhead(speed, speed);
+              }
+              else
+              {
+                MoveReverse(speed, speed);
+              }
             }
             else
             {
-              MoveReverse(speed, speed);
+              gl_pSerPort->printf(F("DONE ABORT 6\n"));
+
             }
+            //SpinTurn(false, 10, 30);
+            //if (gl_bIsForwardDir)
+            //{
+            //  MoveAhead(speed, speed);
+            //}
+            //else
+            //{
+            //  MoveReverse(speed, speed);
+            //}
             break;
 
             //-------------------------------------------------
@@ -2888,8 +2964,8 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             break;
 
           case '5':   // Stop
+            StopBothMotors(); //09/14/26 moved above printout
             gl_pSerPort->printf(F("%lu: Stopping Motors\n"), millis());
-            StopBothMotors();
             speed = 0;
             break;
 
@@ -3096,9 +3172,9 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
   float lastDerror = 0;
   //bool bFirstIMUHdg = true;
 
-  ////DEBUG!!
-  //gl_pSerPort->printf("Msec\tHdg\tPrvHdg\tdHdg\tRate\ttgtDPS\terr\tKp*err\tIval\tKd*Derr\tspeed\tMatch\tSlope\n");
-  ////DEBUG!!
+  //DEBUG!!
+  gl_pSerPort->printf("Msec\tHdg\tPrvHdg\tdHdg\tRate\ttgtDPS\terr\tKp*err\tIval\tKd*Derr\tspeed\tMatch\tSlope\n");
+  //DEBUG!!
 
   float avgrate = 0;
   uint16_t numrates = 0;
@@ -3206,7 +3282,7 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
 
       if (bDoneTurning)
       {
-        //gl_pSerPort->printf("Completed turn with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
+        gl_pSerPort->printf("Completed turn with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
 
         bResult = true;
         break;
@@ -3220,6 +3296,7 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
 
   StopBothMotors();
   //delay(1000); //added 04/27/21 for debug
+  gl_pSerPort->printf("Exiting SpinTurn() with bResult = %d\n", bResult);
   return bResult;
 }
 
@@ -4061,7 +4138,7 @@ void SendTelemetry()
   
   UpdateIMUHdgValDeg(); //updates IMUHdgValDeg
 
-  //const char* LoopTelemStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg\t\tLspd\tRspd";
+  //const char* LoopTelemHdrStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg\t\tLspd\tRspd";
   gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%d\t\t%d\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, rearVar, IMUHdgValDeg, gl_Leftspeednum, gl_Rightspeednum);
 
 }
