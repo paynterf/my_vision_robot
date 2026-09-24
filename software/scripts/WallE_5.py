@@ -8,6 +8,7 @@ Features:
   - Opens serial link to Teensy and relays telemetry
   - Background WiFi OTA watcher for latest.hex
   - Simple interactive command interface
+  - Use python3 -m pyflakes software/scripts/WallE_5.py for static analysis
 
 Location (recommended):
   /home/pi/my_vision_robot/software/scripts/WallE_5.py
@@ -59,7 +60,7 @@ NAV_LOG = Path.home() / "my_vision_robot/logs/nav.log"
 NAV_LOG_MAX_DAYS = 3 * SECONDS_PER_DAY #open this back up to 30 days if you want to keep more history, but it will take up more space
 
 # Startup / auto-nav (default = drive; C = manual override)
-AUTO_NAV_ON_START = True
+AUTO_NAV_ON_START = False
 AUTO_NAV_MIN_WAIT_SEC = 5.0
 AUTO_NAV_REQUIRE_VISION = True
 AUTO_NAV_VISION_TIMEOUT_SEC = 30.0
@@ -95,6 +96,7 @@ log_level = LOG_INFO
 
 #09/13/26 Added to prevent nav command lockout after firmware OTA update
 teensy_needs_command_mode = False
+last_repeat_cmd = None   # added to allow repeated 4/6 commands to accumulate heading in a corridor
 
 # ----------------------------------------------------------------------
 # Utility
@@ -136,7 +138,8 @@ def send_raw(cmd: str):
     """Send a raw string + newline to the Teensy."""
     if ser and ser.is_open:
         ser.write((cmd.strip() + "\n").encode())
-        log(f"TX → {cmd.strip()}")
+        if LOG_LEVEL >= LOG_VERBOSE:
+            log(f"TX → {cmd.strip()}")
         
 def send_turn(direction: str, degrees: float, rate: float = None):
     """
@@ -497,8 +500,8 @@ def apply_nav_from_latest():
             last_no_data_count = 0
             last_too_close_count = 0
 
-            if in_deadband and last_speed_increment == 0:
-                last_speed_increment = 1
+            if in_deadband and last_speed_increment < NAV_MAX_SPEED_INCREMENT:
+                last_speed_increment += 1
                 send_nav_cmd(
                     "8",
                     f"deadband speed-up (turn_deg={turn_deg:.1f}, depth={depth:.0f} mm)",
@@ -507,15 +510,13 @@ def apply_nav_from_latest():
             elif in_deadband:
                 return
             elif turn_deg < 0:
-                last_speed_increment = 0
                 send_nav_cmd(
                     "4",
                     f"left (turn_deg={turn_deg:.1f})",
                     force=True,
                 )
             else:
-                last_speed_increment = 0
-                send_nav_cmd(
+                 send_nav_cmd(
                     "6",
                     f"right (turn_deg={turn_deg:.1f})",
                     force=True,
@@ -526,12 +527,13 @@ def apply_nav_from_latest():
             if last_too_close_count < TOO_CLOSE_DETECTION_WINDOW:
                 return
             last_too_close_count = 0
-            last_speed_increment = 0
             send_nav_cmd(
                 "5",
                 f"TOO_CLOSE stop, depth={depth:.0f} mm",
                 force=True,
-            )
+            )           
+            last_speed_increment = 0
+
             if depth < (MIN_BACKUP_CLEAR_DIST_CM * 10.0):
                 send_nav_seq(
                     [
@@ -550,7 +552,6 @@ def apply_nav_from_latest():
             if last_no_data_count < NO_DATA_DETECTION_WINDOW:
                 return
             last_no_data_count = 0
-            last_speed_increment = 0
             send_nav_seq(
                 [
                     ("5", "stop"),
@@ -563,34 +564,42 @@ def apply_nav_from_latest():
                 ],
                 f"NO_DATA, depth={depth:.0f} mm",
             )
+            last_speed_increment = 0
 
         case _:
             return
 
+def enter_teensy_command_menu():
+    """Once per serial session: outer CFUI -> inner command menu."""
+    send_raw("C")
+    time.sleep(0.2)
+    log("TX command menu – sent C")
+
+
 def enter_manual_mode(reason: str = "manual override"):
-    """Stop autonomous nav and halt motors. C / manual uses this."""
-    global nav_enabled, last_nav_cmd_sent
+    """WallE MANUAL: stop AUTO and send inner-menu 5."""
+    global nav_enabled, last_nav_cmd_sent, last_speed_increment
     nav_enabled = False
     last_nav_cmd_sent = None
+    last_speed_increment = 0
     send_raw("5")
     log(f"MANUAL mode – {reason}")
 
 
 def enter_auto_mode(reason: str = "auto"):
-    """Resume autonomous nav. Assumes Teensy already accepts 4/6/5 (command mode)."""
-    global nav_enabled, last_nav_cmd_sent
+    """WallE AUTO only. Teensy must already be in the command menu."""
+    global nav_enabled, last_nav_cmd_sent, last_speed_increment
     nav_enabled = True
     last_nav_cmd_sent = None
+    last_speed_increment = 0
+    send_raw("/") #make sure robot is in forward mode when entering AUTO mode
     log(f"AUTO NAV – {reason}")
 
 
 def try_auto_nav():
-    """
-    After startup checks: wait for settle (+ optional vision), then enable AUTO.
-    Runs in a background thread so the prompt/override loop stays alive.
-    """
     if not AUTO_NAV_ON_START:
         log("AUTO_NAV_ON_START is False – staying manual")
+        print("> ", end="", flush=True)
         return
 
     log("Auto-nav: waiting for system to settle...")
@@ -605,12 +614,8 @@ def try_auto_nav():
             log("Auto-nav: no vision data – staying MANUAL")
             return
 
-    # Enter Teensy command mode once, then enable auto commanding
-    # send_raw("C")
-    # time.sleep(0.3)
-    reenter_command_mode("auto-nav startup")
-    enter_auto_mode("startup checks passed")
-    
+    enter_auto_mode("startup checks passed") 
+
 def rotate_telemetry_logs():
     """Archive telemetry.log to YYMMDD_HHMM_telemetry.log; prune old archives."""
     log_dir = TELEMETRY_LOG.parent
@@ -641,7 +646,7 @@ def rotate_telemetry_logs():
             print(f"Could not delete {p.name}: {e}")
 
 def rotate_nav_logs():
-    """Archive telemetry.log to YYMMDD_HHMM_telemetry.log; prune old archives."""
+    """Archive nav.log to YYMMDD_HHMM_nav.log; prune old archives."""
     log_dir = NAV_LOG.parent
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -654,7 +659,7 @@ def rotate_nav_logs():
             archive = log_dir / f"{stamp}_{n}_nav.log"
             n += 1
         NAV_LOG.rename(archive)
-        print(f"Archived previous telemetry to {archive.name}")
+        print(f"Archived previous nav log to {archive.name}")
 
     NAV_LOG.write_text("")  # new session file
 
@@ -719,7 +724,7 @@ def wait_for_done(cmd: str, timeout: float):
                 log("Operator STOP during wait_for_done")
                 return "ABORT STOP"
             if user in ("c", "cmd", "manual"):
-                send_raw("C")
+                #send_raw("C")
                 enter_manual_mode("operator C during wait_for_done")
                 return "ABORT MANUAL"
         remaining = deadline - time.time()
@@ -759,7 +764,7 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
             sec = float(cmd[1:] or 1.0)
         except ValueError:
             sec = 1.0
-        if LOG_LEVEL >= LOG_VERBOSE:
+        if LOG_LEVEL >= LOG_INFO:
             log(f"NAV → {cmd}  ({reason})")
         time.sleep(max(0.0, sec))
         last_nav_cmd_time = time.time()
@@ -776,7 +781,7 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
     send_raw(cmd)
     last_nav_cmd_time = time.time()
     last_nav_cmd_sent = cmd
-    if LOG_LEVEL >= LOG_VERBOSE:
+    if LOG_LEVEL >= LOG_INFO:
         log(f"NAV → {cmd}  ({reason})")
 
     if not wait:
@@ -792,7 +797,7 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
         if "MANUAL" in done or "STOP" in done:
             return False
         return NAV_SEQ_CONTINUE_ON_FW_ABORT    
-    if LOG_LEVEL >= LOG_VERBOSE:
+    if LOG_LEVEL >= LOG_INFO:
         log(f"DONE ← {done}")
     return True
 
@@ -809,15 +814,6 @@ def send_nav_seq(steps, reason):
             nav_enabled = False
             break
 
-def reenter_command_mode(reason):
-    global last_speed_increment, last_nav_cmd_sent
-
-    send_raw("C")
-    time.sleep(0.3)
-    last_speed_increment = 0
-    last_nav_cmd_sent = None
-    enter_auto_mode(reason)
-
 
 # ----------------------------------------------------------------------
 # Main
@@ -831,16 +827,19 @@ def main():
 
     print(f"Telemetry log: {TELEMETRY_LOG}")
     rotate_telemetry_logs()
-    print("In a second terminal run:  tail -f ~/my_vision_robot/logs/telemetry.log\n")
+    #print("In a second terminal run:  tail -f ~/my_vision_robot/logs/telemetry.log\n")
 
     NAV_LOG.parent.mkdir(parents=True, exist_ok=True)
     print(f"Supervisor log: {NAV_LOG}")
-    print("In another terminal:  tail -f ~/my_vision_robot/logs/nav.log\n")
+    rotate_nav_logs()
+    #print("In another terminal:  tail -f ~/my_vision_robot/logs/nav.log\n")
 
     # 1. Serial
     if not open_serial():
         log("Could not open serial port. Exiting.")
         sys.exit(1)
+    enter_teensy_command_menu()#09/23/26 The only 'C' sent to the Teensy is at startup, so WallE_5.py can enter AUTO mode after OTA update without sending 'C' again
+    enter_manual_mode("startup") #09/20/26 added to make sure WallE_5.py sends '5' to Teensy after restart
 
     # 2. Camera
     #start_camera() #disabled to make sure camera is up and running before starting WallE_5.py
@@ -861,20 +860,22 @@ def main():
     ota_thread = threading.Thread(target=ota_watcher_loop, daemon=True)
     ota_thread.start()
 
-     # 6. Default = AUTO after checks; C = manual override
+    # 6. Stay MANUAL until operator types 'auto'
     has_tty = sys.stdin.isatty()
     if has_tty:
-        input("Press Enter to start navigating...")
-        log("Ready – auto-nav will start after checks (C = manual override)")
+        input("Press Enter for the command prompt (motors stay stopped until 'auto')...")
+        log("Ready – MANUAL (type auto to navigate, C or 5 to stop)")
         print("Type 'help' for commands.  C = manual, auto = resume nav.\n")
         print("> ", end="", flush=True)
     else:
-        log("No TTY – keyboard C unavailable; auto-nav starting anyway")
+        log("No TTY – keyboard unavailable; staying MANUAL (AUTO_NAV_ON_START=False)")
     threading.Thread(target=try_auto_nav, daemon=True).start()
     
     # 7. Interactive loop (CheckForManualOverride + apply auto-nav)
+    last_repeat_cmd = None   # near other locals in main(), or a global
+
     while True:
-        user = ""
+        user = None
         try:
             if has_tty and select.select([sys.stdin], [], [], 0.1)[0]:
                 user = sys.stdin.readline().strip()
@@ -886,12 +887,24 @@ def main():
 
         if teensy_needs_command_mode:
             teensy_needs_command_mode = False
-            reenter_command_mode("post-OTA")
+            enter_teensy_command_menu()
+            enter_manual_mode("post-OTA")
+            if has_tty:
+                print("> ", end="", flush=True)
 
         apply_nav_from_latest()
 
-        if not user:
+        if user is None:
             continue
+
+        if user == "":
+            if last_repeat_cmd:
+                user = last_repeat_cmd
+                log(f"repeat → {user}")
+            else:
+                if has_tty:
+                    print("> ", end="", flush=True)
+                continue
 
         low = user.lower()
 
@@ -900,20 +913,26 @@ def main():
         elif low in ("help", "h", "?"):
             print_help()
         elif low in ("c", "cmd", "manual"):
+            log(f"Received {user}: Entering MANUAL mode")
             enter_manual_mode("operator C / manual")
+            last_repeat_cmd = None
+            #nav_enabled = False #added 09/22/26
         elif low in ("auto", "nav"):
-            send_raw("C")
-            time.sleep(0.2)
-            enter_auto_mode("operator resume")
+            enter_auto_mode("operator resume auto-nav")
+            last_repeat_cmd = None
         elif low in ("5", "stop"):
             send_raw("5")
+            last_repeat_cmd = None
         elif user[0].upper() in ("L", "R"):
             send_raw(user.upper())
+            last_repeat_cmd = user.upper()
         else:
             send_raw(user)
+            last_repeat_cmd = user if user in ("4", "6", "8", "2", ".", "/", "0", "1") else None
 
         if has_tty:
             print("> ", end="", flush=True)
+        
 
     # Cleanup
     log("Shutting down WallE_5...")
