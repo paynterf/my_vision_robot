@@ -66,7 +66,8 @@ const uint16_t WALL_TRACK_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE;//10/02/22
 //const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = 250; //10/02/22 added to separate out slow front LIDAR from faster VL53L1X sensors
 const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE; //03/15/23 Garmin LIDAR can easily keep up with other sensors
 const uint16_t TURN_RATE_UPDATE_INTERVAL_MSEC = 30; //30 mSec is as fast as it can go
-const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 100; //added 09/25/23
+//const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 100; //added 09/25/23
+const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 500; //09/21/26
 const uint16_t TELEMETRY_HEADER_PRINT_INTERVAL_MSEC = 50 * TELEMETRY_PRINT_INTERVAL_MSEC; //added 09/01/26
 
 elapsedMillis MsecSinceLastAdj; //added 05/24/22 for ParallelOrientation() routine
@@ -394,6 +395,8 @@ unsigned long prevTime = 0;
 float gl_IMUHdgValDeg = 0.0;
 float gl_Prev_HdgDeg = 0.0;
 bool gl_bMPU6050Ready = false;
+bool gl_bCFUI_Abort = false; //09/22/26 added to prevent SpinTurn() run-on after '5' sent to CheckForUserInput()
+
 #pragma endregion GLOBAL_VARIABLES
 
 const float GYRO_Z_SENSITIVITY = 131.0;
@@ -741,12 +744,12 @@ void loop()
   if (mSecSinceLastTelemetryUpdate >= TELEMETRY_PRINT_INTERVAL_MSEC)
   {
     mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
-    //if (gl_bIsFirstLoopTelemetrySend)
-    //{
-    //  gl_pSerPort->println(LoopTelemHdrStr);
-    //  gl_bIsFirstLoopTelemetrySend = false;
-    //}
-    //SendTelemetry();
+    if (gl_bIsFirstLoopTelemetrySend)
+    {
+      gl_pSerPort->println(LoopTelemHdrStr);
+      gl_bIsFirstLoopTelemetrySend = false;
+    }
+    SendTelemetry();
   }
   if (mSecSinceLastTelemetryHeader >= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC)
   {
@@ -2550,7 +2553,7 @@ bool CheckForUserInput()
 
     // say what you got:
     //08/07/26 rev to output debug info on Serial (USB port)
-    //Serial.printf("in CheckForUserInput just before call to CheckForUserInput(incomingByte)\n");
+    //Serial1.printf("in CheckForUserInput got %c from Serial\n", incomingByte);
 
     //09/27/22 now just call CheckForUserInput(incomingByte)
     retval = CheckForUserInput(incomingByte);
@@ -2631,7 +2634,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
       StopBothMotors(); //09/14/26 moved above menu printout
       int speed = 0;
 
-      gl_pSerPort->printf("%lu: At top of COMMAND_MODE Case\n", (uint32_t)gl_ElapsedRunMillisec);
+      //gl_pSerPort->printf("%lu: At top of COMMAND_MODE Case\n", (uint32_t)gl_ElapsedRunMillisec);
       gl_pSerPort->printf(F("ENTERING COMMAND MODE:\n"));
       gl_pSerPort->printf(F("0 = 180 deg CCW Turn\n"));
       gl_pSerPort->printf(F("1 = 180 deg CW Turn\n"));
@@ -2676,7 +2679,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
           cmdPort->readBytesUntil('\n', buff, sizeof(buff) - 1);
           incomingByte = buff[0];
 
-          gl_pSerPort->printf("I received '%s'\n", buff);
+          gl_pSerPort->printf("%lu: I received '%s'\n", millis(), buff);
 
           // Drain any remaining characters on the same port
           while (cmdPort->available())
@@ -2818,8 +2821,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
           // Fixed 180° turns
           //-------------------------------------------------
           case '0':
-            //gl_pSerPort->printf(F("CCW 180 deg Turn\n"));
-            //gl_pSerPort->printf(F("%lu: CCW 180 deg Turn\n"), millis());
+            gl_pSerPort->printf(F("%lu: CCW 180 deg Turn\n"), millis());
             gl_pSerPort->printf(F("ACK 0\n"));
 
             if(SpinTurn(true, 180, 90))
@@ -2843,6 +2845,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             break;
 
           case '1':
+            gl_pSerPort->printf(F("%lu: CW 180 deg Turn\n"), millis());
             gl_pSerPort->printf(F("ACK 1\n"));
 
             if (SpinTurn(false, 180, 90))
@@ -2869,11 +2872,12 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             // 10° nudge turns
             //-------------------------------------------------
           case '4':   // Left / CCW
-            gl_pSerPort->printf(F("ACK 4\n"));
+            gl_pSerPort->printf(F("%lu: CCW 10 deg Turn\n"), millis());
+            //gl_pSerPort->printf(F("ACK 4\n"));
 
-            if (SpinTurn(false, 10, 30))
+            if (SpinTurn(true, 10, 30))
             {
-              gl_pSerPort->printf(F("DONE 4\n"));
+              //gl_pSerPort->printf(F("DONE 4\n"));
 
               if (gl_bIsForwardDir)
               {
@@ -2886,20 +2890,20 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             }
             else
             {
-              gl_pSerPort->printf(F("DONE ABORT 4\n"));
+              //gl_pSerPort->printf(F("DONE ABORT 4\n"));
 
             }
             break;
 
           case '6':   // Right / CW
-            //gl_pSerPort->printf(F("%lu: CW 10 deg Turn\n"), millis());
+            gl_pSerPort->printf(F("%lu: CW 10 deg Turn\n"), millis());
               //09/16/26 added for handshaking with WallE_5.py
 
-            gl_pSerPort->printf(F("ACK 6\n"));
+            //gl_pSerPort->printf(F("ACK 6\n"));
 
             if (SpinTurn(false, 10, 30))
             {
-              gl_pSerPort->printf(F("DONE 6\n"));
+              //gl_pSerPort->printf(F("DONE 6\n"));
 
               if (gl_bIsForwardDir)
               {
@@ -2912,7 +2916,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             }
             else
             {
-              gl_pSerPort->printf(F("DONE ABORT 6\n"));
+              //gl_pSerPort->printf(F("DONE ABORT 6\n"));
 
             }
             //SpinTurn(false, 10, 30);
@@ -2967,6 +2971,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             StopBothMotors(); //09/14/26 moved above printout
             gl_pSerPort->printf(F("%lu: Stopping Motors\n"), millis());
             speed = 0;
+            //gl_bCFUI_Abort = true; //09/22/26 added to force SpinTurn() loop termination
             break;
 
             //-------------------------------------------------
@@ -3035,7 +3040,7 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
             break;
 
           default:
-            gl_pSerPort->printf(F("Unknown command: '%c' - Stopping Motors\n"), incomingByte);
+            gl_pSerPort->printf(F("Unknown command menu character: '%c' - Stopping Motors\n"), incomingByte);
             StopBothMotors();
             break;
           } // end inner switch
@@ -3051,7 +3056,9 @@ bool CheckForUserInput(char in_char)  // 11/04/23 chg to bool ret value so can u
       break;
 
     default:
-      // Unknown top-level character – ignore
+      // Unknown top-level character – stop motors
+      gl_pSerPort->printf(F("Unknown top-level character: '%c' - Stopping Motors\n"), in_char);
+      StopBothMotors();
       break;
     } // end outer switch
   } // end if (in_char != 0)
@@ -3173,13 +3180,14 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
   //bool bFirstIMUHdg = true;
 
   //DEBUG!!
-  gl_pSerPort->printf("Msec\tHdg\tPrvHdg\tdHdg\tRate\ttgtDPS\terr\tKp*err\tIval\tKd*Derr\tspeed\tMatch\tSlope\n");
+  //gl_pSerPort->printf("Msec\tHdg\tPrvHdg\tdHdg\tRate\ttgtDPS\terr\tKp*err\tIval\tKd*Derr\tspeed\tMatch\tSlope\n");
   //DEBUG!!
 
   float avgrate = 0;
   uint16_t numrates = 0;
+  //gl_bCFUI_Abort = false; //09/22/26 added to prevent SpinTurn() run-on after '5' sent to CheckForUserInput()
 
-  while (!bDoneTurning && !bTimedOut)
+  while (!bDoneTurning && !bTimedOut && !gl_bCFUI_Abort)//rev 09/22/26 to add gl_bCFUI_Abort
   {
     //11/06/20 now just loops between PID calcs
     CheckForUserInput();
