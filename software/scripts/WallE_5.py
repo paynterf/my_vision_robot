@@ -3,7 +3,8 @@
 WallE_5.py – Supervisory program for the vision-enhanced 4-wheel robot
 
 Features:
-  - Does NOT automatically enter Teensy command mode
+  - Sends one 'C' after opening serial so the Teensy is in the 'command' menu
+  - Stays MANUAL until the operator types 'auto'
   - Starts camera pipeline (background)
   - Opens serial link to Teensy and relays telemetry
   - Background WiFi OTA watcher for latest.hex
@@ -424,16 +425,31 @@ def ota_watcher_loop():
 # Interactive help
 # ----------------------------------------------------------------------
 def print_help():
-    print("""
-Available commands:
-  C / manual   Stop auto-nav → manual control (override)
-  auto / nav   Resume autonomous clearest-direction mode
-  5 / stop     Stop motors
-  Lxx.xx       Turn left  xx.xx degrees
-  Rxx.xx       Turn right xx.xx degrees
-  help         Show this help
-  quit / exit  Exit WallE_5
-""")
+    helptext = """
+********************************************************
+****************** COMMAND KEYS ************************
+********************************************************
+0 = 180 deg CCW Turn
+1 = 180 deg CW Turn
+A = Abort - Reboots Processor
+/ = Forward
+.(dot) = Reverse
+* = Exit ChkForUserInput()
+ Faster
+	8
+Left 4	5 6 Right
+	2
+ Slower
+Lxx.x or Rxx.x = SpinTurn xx.x degrees
+Lxx.x,yy or Rxx.x,yy = SpinTurn with custom rate
+Tddd.d = Turn to heading ddd.d
+
+help/C Show this help
+quit / exit  Exit WallE_5
+"""
+
+    print(helptext)
+    log(helptext, level=LOG_VERBOSE)
 
 # ----------------------------------------------------------------------
 # ROS nav subscriber (clearest direction)
@@ -571,19 +587,22 @@ def apply_nav_from_latest():
 
 def enter_teensy_command_menu():
     """Once per serial session: outer CFUI -> inner command menu."""
-    send_raw("C")
-    time.sleep(0.2)
-    log("TX command menu – sent C")
+    # send_raw("C")
+    # time.sleep(0.2)
+    # log("TX command menu – sent C")
+    log("Bypassing 'enter_teensy_command_menu()")
 
 
 def enter_manual_mode(reason: str = "manual override"):
     """WallE MANUAL: stop AUTO and send inner-menu 5."""
-    global nav_enabled, last_nav_cmd_sent, last_speed_increment
-    nav_enabled = False
-    last_nav_cmd_sent = None
-    last_speed_increment = 0
-    send_raw("5")
-    log(f"MANUAL mode – {reason}")
+    # global nav_enabled, last_nav_cmd_sent, last_speed_increment
+    # nav_enabled = False
+    # last_nav_cmd_sent = None
+    # last_speed_increment = 0
+    # send_raw("5")
+    # log(f"MANUAL mode – {reason}")
+    log("Bypassing 'enter_manual_mode()")
+
 
 
 def enter_auto_mode(reason: str = "auto"):
@@ -591,8 +610,9 @@ def enter_auto_mode(reason: str = "auto"):
     global nav_enabled, last_nav_cmd_sent, last_speed_increment
     nav_enabled = True
     last_nav_cmd_sent = None
-    last_speed_increment = 0
+    last_speed_increment = 1 #
     send_raw("/") #make sure robot is in forward mode when entering AUTO mode
+    send_raw("8") #make sure robot is moving forward when entering AUTO mode
     log(f"AUTO NAV – {reason}")
 
 
@@ -715,7 +735,7 @@ def wait_for_done(cmd: str, timeout: float):
     Returns the DONE/ABORT line, or None on timeout.
     """
     deadline = time.time() + timeout
-    needle = cmd.strip().split(",")[0]  # "L45" from "L45,30"
+    trigger = cmd.strip().split(",")[0]  # "L45" from "L45,30"
     while time.time() < deadline:
         if sys.stdin.isatty() and select.select([sys.stdin], [], [], 0)[0]:
             user = sys.stdin.readline().strip().lower()
@@ -723,10 +743,10 @@ def wait_for_done(cmd: str, timeout: float):
                 send_raw("5")
                 log("Operator STOP during wait_for_done")
                 return "ABORT STOP"
-            if user in ("c", "cmd", "manual"):
-                #send_raw("C")
-                enter_manual_mode("operator C during wait_for_done")
-                return "ABORT MANUAL"
+            # if user in ("c", "cmd", "manual"):
+            #     #send_raw("C")
+            #     enter_manual_mode("operator C during wait_for_done")
+            #     return "ABORT MANUAL"
         remaining = deadline - time.time()
         if remaining <= 0:
             break
@@ -734,7 +754,7 @@ def wait_for_done(cmd: str, timeout: float):
             line = teensy_events.get(timeout=min(0.1, remaining))
         except queue.Empty:
             continue
-        if line.startswith("DONE ") and needle in line:
+        if line.startswith("DONE ") and trigger in line:
             return line
         if line.startswith("DONE ") and "ABORT" in line:
             return line
@@ -910,12 +930,12 @@ def main():
 
         if low in ("quit", "exit", "q"):
             break
-        elif low in ("help", "h", "?"):
+        elif low in ("help", "h", "?", "c"):
             print_help()
-        elif low in ("c", "cmd", "manual"):
-            log(f"Received {user}: Entering MANUAL mode")
-            enter_manual_mode("operator C / manual")
-            last_repeat_cmd = None
+        # elif low in ("c", "cmd", "manual"):
+        #     log(f"Received {user}: Entering MANUAL mode")
+        #     enter_manual_mode("operator C / manual")
+        #     last_repeat_cmd = None
             #nav_enabled = False #added 09/22/26
         elif low in ("auto", "nav"):
             enter_auto_mode("operator resume auto-nav")
