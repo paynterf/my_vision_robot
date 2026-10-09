@@ -36,7 +36,7 @@ extern "C"
 //#define PID_TUNING_TELEMETRY_ONLY //added 07/22/23 to facilitate PID tuning
 //#define CHG_STATION_PID_TUNING_TEST //added 11/16/23 to document this testing block & then commented out -
 //#define FRONTBACKMOTION_TESTING_ONLY //added 11/16/23
-#define NO_TELEMETRY //added 09/24/26
+//#define NO_TELEMETRY //added 09/24/26
 
 #define __FILENAME__ (strrchr(__FILE__, '\\') ? strrchr(__FILE__, '\\') + 1 : __FILE__) //added 01/26/23 to extract pgm filename from full path
 #pragma endregion DEFINES
@@ -68,8 +68,11 @@ const uint16_t WALL_TRACK_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE;//10/02/22
 const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE; //03/15/23 Garmin LIDAR can easily keep up with other sensors
 const uint16_t TURN_RATE_UPDATE_INTERVAL_MSEC = 30; //30 mSec is as fast as it can go
 //const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 100; //added 09/25/23
-const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 500; //09/21/26
-const uint16_t TELEMETRY_HEADER_PRINT_INTERVAL_MSEC = 50 * TELEMETRY_PRINT_INTERVAL_MSEC; //added 09/01/26
+//const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 500; //09/21/26
+const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 2000; //10/03/26
+const uint32_t TELEMETRY_HEADER_PRINT_INTERVAL_MSEC = 50 * TELEMETRY_PRINT_INTERVAL_MSEC; //added 09/01/26
+//#define IMU_HDG_CORRECTION_FACTOR 0.787401575 //added 10/03/26 this is 1/1.27, where 1.27 was derived from protractor vs IMUHdgDegVal readings
+#define IMU_HDG_CORRECTION_FACTOR 0.753405824 //rev 10/07/26 for better correction
 
 elapsedMillis MsecSinceLastAdj; //added 05/24/22 for ParallelOrientation() routine
 elapsedMillis MsecSinceLastIRHomingAdj; //01/07/22 used for #ifdef IR_HOMING_ONLY block
@@ -395,7 +398,7 @@ float LeftSteer[QUICKSORT_ARRAY_SIZE];
 const uint16_t MIN_RUN_TO_DAYLIGHT_DIST_CM = 150;//added 10/14/23
 
 unsigned long prevTime = 0;
-float gl_IMUHdgValDeg = 0.0;
+//float gl_IMUHdgValDeg = 0.0; //c/o 09/28/26 using UpdateIMUValDeg instead
 float gl_Prev_HdgDeg = 0.0;
 bool gl_bMPU6050Ready = false;
 bool gl_bCFUI_Abort = false; //09/22/26 added to prevent SpinTurn() run-on after '5' sent to CheckForUserInput()
@@ -759,13 +762,13 @@ void loop()
     }
     SendTelemetry();
   }
-  if (mSecSinceLastTelemetryHeader >= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC)
-  {
-    mSecSinceLastTelemetryHeader -= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC;
-#ifndef NO_TELEMETRY
-    gl_pSerPort->println(LoopTelemHdrStr);
-#endif
-  }
+//  if (mSecSinceLastTelemetryHeader >= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC)
+//  {
+//    mSecSinceLastTelemetryHeader -= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC;
+//#ifndef NO_TELEMETRY
+//    gl_pSerPort->println(LoopTelemHdrStr);
+//#endif
+//  }
 
   delay(400); //08/17/23 put in to make sure distances are current
 }
@@ -2599,7 +2602,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
 
   //byte incomingByte = 0;
   bool retval = true;
-  int speed = 0; //added 09/24/26
+  //int speed = 0; //added 09/24/26
 
   //buff[0] = in_char;
   //gl_pSerPort->printf("CheckForUserInput(char %c)\n", in_char);
@@ -2651,11 +2654,10 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     //---------------------------------------------------------------------
   case 0x43: // 'C'
   case 0x63: // 'c'
-//#pragma region COMMAND_MODE
   {//needed to avoid "crosses initialization of int speed" compiler error
     gl_pSerPort->printf("Stopping Motors\n\n");
     StopBothMotors(); //09/14/26 moved above menu printout
-    int speed = 0;
+    //int speed = 0;
 
     //gl_pSerPort->printf("%lu: At top of COMMAND_MODE Case\n", (uint32_t)gl_ElapsedRunMillisec);
     //gl_pSerPort->printf(F("ENTERING COMMAND MODE:\n"));
@@ -2681,11 +2683,20 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     // Flush any leftover characters on both ports
     while (Serial.available())  Serial.read();
     while (Serial1.available()) Serial1.read();
-
-    //incomingByte = 0;
-    bool bDone = false;
-    break;
   }
+  break;
+
+//-------------------------------------------------
+// Current IMU heading.
+//-------------------------------------------------
+  case 'H'://added 09/27/26
+    //gl_pSerPort->printf(F("%lu ACK H\n"), millis());
+
+    UpdateIMUHdgValDeg(); //updates IMUHdgValDeg
+    gl_pSerPort->printf("%lu: IMU Heading = % .2f Deg\n", millis(), IMUHdgValDeg);
+    gl_pSerPort->printf(F("%lu DONE H\n"), millis());
+
+    break;
 
   //-------------------------------------------------
   // Arbitrary angle turns: L30, R45.5, L90,30 etc.
@@ -2717,21 +2728,21 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       {
         //09/16/26 added for handshaking with WallE_5.py
         //gl_pSerPort->printf(F("DONE %c%.2f deg @ %.1f deg/s\n"), incomingByte, degrees, rate);
-        gl_pSerPort->printf(F("DONE %s%.2f deg @ %.1f deg/s\n"), buff[0], degrees, rate);
+        gl_pSerPort->printf(F("DONE %c%.2f deg @ %.1f deg/s\n"), buff[0], degrees, rate);
 
         if (gl_bIsForwardDir)
         {
-          MoveAhead(speed, speed);
+          MoveAhead(gl_Leftspeednum, gl_Rightspeednum);
         }
         else
         {
-          MoveReverse(speed, speed);
+          MoveReverse(gl_Leftspeednum, gl_Rightspeednum);
         }
       }
       else //09/16/26 added for handshaking with WallE_5.py
       {
         //gl_pSerPort->printf(F("DONE ABORT %c%.2f deg @ %.1f deg/s\n"), incomingByte, degrees, rate);
-        gl_pSerPort->printf(F("DONE ABORT %s%.2f deg @ %.1f deg/s\n"), buff, degrees, rate);
+        gl_pSerPort->printf(F("DONE ABORT %c%.2f deg @ %.1f deg/s\n"), buff[0], degrees, rate);
       }
     }
     else
@@ -2763,8 +2774,8 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       if (TurnToHdgDeg(hdg_deg))
       {
         gl_pSerPort->printf(F("DONE T\n"));
-        float actual = UpdateIMUHdgValDeg();
-        gl_pSerPort->printf(F("Hdg now %2.2f\n"), actual);
+        float actualhdg = UpdateIMUHdgValDeg();
+        gl_pSerPort->printf(F("Case T%2.1f: Hdg now %2.2f\n"), hdg_deg, actualhdg);
       }
       else
       {
@@ -2791,11 +2802,11 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
 
       if (gl_bIsForwardDir)
       {
-        MoveAhead(speed, speed);
+        MoveAhead(gl_Leftspeednum, gl_Rightspeednum);
       }
       else
       {
-        MoveReverse(speed, speed);
+        MoveReverse(gl_Leftspeednum, gl_Rightspeednum);
       }
     }
     else
@@ -2817,11 +2828,11 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
 
       if (gl_bIsForwardDir)
       {
-        MoveAhead(speed, speed);
+        MoveAhead(gl_Leftspeednum, gl_Rightspeednum);
       }
       else
       {
-        MoveReverse(speed, speed);
+        MoveReverse(gl_Leftspeednum, gl_Rightspeednum);
       }
     }
     else
@@ -2846,11 +2857,11 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
 
       if (gl_bIsForwardDir)
       {
-        MoveAhead(speed, speed);
+        MoveAhead(gl_Leftspeednum, gl_Rightspeednum);
       }
       else
       {
-        MoveReverse(speed, speed);
+        MoveAhead(gl_Leftspeednum, gl_Rightspeednum);
       }
     }
     else
@@ -2874,11 +2885,11 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
 
       if (gl_bIsForwardDir)
       {
-        MoveAhead(speed, speed);
+        MoveAhead(gl_Leftspeednum, gl_Rightspeednum);
       }
       else
       {
-        MoveReverse(speed, speed);
+        MoveAhead(gl_Leftspeednum, gl_Rightspeednum);
       }
     }
     else
@@ -2939,10 +2950,19 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     break;
 
   case '5':   // Stop
+    gl_pSerPort->printf(F("%lu ACK 5\n"), millis()); //added 'ACK' & 'DONE' to '5'(stop) cmd
+
     StopBothMotors(); //09/14/26 moved above printout
     gl_pSerPort->printf(F("%lu: Stopping Motors\n"), millis());
-    speed = 0;
-    //gl_bCFUI_Abort = true; //09/22/26 added to force SpinTurn() loop termination
+    //speed = 0;
+    gl_bCFUI_Abort = true; //09/22/26 added to force SpinTurn() loop termination
+
+    // Flush any leftover characters on both ports
+    while (Serial.available())  Serial.read();
+    while (Serial1.available()) Serial1.read();
+
+    gl_pSerPort->printf(F("%lu DONE 5\n"), millis());
+
     break;
 
     //-------------------------------------------------
@@ -2951,18 +2971,19 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   case '.':   // Reverse
     gl_pSerPort->printf(F("%lu: Setting both motors to reverse\n"), millis());
     gl_bIsForwardDir = false;
-    MoveReverse(speed, speed);
+    //MoveReverse(speed, speed);
+    StopBothMotors();
     break;
 
   case '/':   // Forward
     gl_pSerPort->printf(F("%lu: Setting both motors to forward\n"), millis());
     gl_bIsForwardDir = true;
-    MoveAhead(speed, speed);
+    //MoveForward(speed, speed);
+    StopBothMotors();
     break;
 
   default:
     // Unknown top-level character – stop motors
-    //gl_pSerPort->printf(F("Unknown top-level character: '%c' - Stopping Motors\n"), in_char);
     gl_pSerPort->printf(F("Unknown top-level character: '%c' - Stopping Motors\n"), buff[0]);
     StopBothMotors();
     break;
@@ -3006,9 +3027,9 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
 
   numDeg = abs(numDeg);//  03/22/22 added to ensure numDeg >= 0
   //DEBUG!!
-  //gl_pSerPort->printf("In SpinTurn(%s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
-  //  b_ccw == TURNDIR_CCW ? "CCW" : "CW", numDeg, degPersec,
-  //  TurnRate_Kp, TurnRate_Ki, TurnRate_Kd);
+  gl_pSerPort->printf("In SpinTurn(%s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
+    b_ccw == TURNDIR_CCW ? "CCW" : "CW", numDeg, degPersec,
+    TurnRate_Kp, TurnRate_Ki, TurnRate_Kd);
   //DEBUG!!
 
   //no need to continue if the IMU isn't available
@@ -3091,7 +3112,7 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
 
   float avgrate = 0;
   uint16_t numrates = 0;
-  //gl_bCFUI_Abort = false; //09/22/26 added to prevent SpinTurn() run-on after '5' sent to CheckForUserInput()
+  gl_bCFUI_Abort = false; //09/22/26 added to prevent SpinTurn() run-on after '5' sent to CheckForUserInput()
 
   while (!bDoneTurning && !bTimedOut && !gl_bCFUI_Abort)//rev 09/22/26 to add gl_bCFUI_Abort
   {
@@ -3105,19 +3126,29 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
       UpdateIMUHdgValDeg(); //update IMUHdgValDeg
 
       float dHdg = IMUHdgValDeg - Prev_HdgDeg;
+
       if (dHdg > 180)
       {
+        Serial.printf("dHdg %2.2f > 180 - subtracting 360\n", dHdg);
         dHdg -= 360;
-        //Serial.printf("dHdg > 180 - subtracting 360\n");
       }
       else if (dHdg < -180)
       {
+        Serial.printf("dHdg %2.2f < -180 - adding 360\n", dHdg);
         dHdg += 360;
-        //Serial.printf("dHdg < -180 - adding 360\n");
       }
 
       //watch for turn rates that are wildly off
+      //added 10/03/26 to skip bad heading values
       float rate = abs(1000 * dHdg / TURN_RATE_UPDATE_INTERVAL_MSEC);
+      if (abs(rate) > 4 * degPersec)
+      {
+        Serial.printf("Skipping bad hdg %2.2f.  dHdg = %2.2f, rate = %2.2f, degPerSec = %2.2f\n", 
+          IMUHdgValDeg, dHdg, rate, degPersec);
+        Prev_HdgDeg = IMUHdgValDeg; //re-synch prev to curr hdg for next time
+
+        continue; //skip this heading reading
+      }
       avgrate += rate;
       numrates++;
 
@@ -3146,7 +3177,7 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
       curHdgMatchVal = GetHdgMatchVal(tgt_deg, IMUHdgValDeg);
       matchSlope = curHdgMatchVal - prevHdgMatchVal;
 
-      ////DEBUG!!
+      //DEBUG!!
       //gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%d\t%2.2f\t%2.2f\n",
       //  millis(),
       //  IMUHdgValDeg,
@@ -3161,11 +3192,11 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
       //  speed,
       //  curHdgMatchVal,
       //  matchSlope);
-      //gl_pSerPort->printf("%lu\t%2.2f\t%d\n",
-      //  millis(),
-      //  rate,
-      //  speed);
-      ////DEBUG!!
+  /*    gl_pSerPort->printf("%lu\t%2.2f\t%d\n",
+        millis(),
+        rate,
+        speed);
+  */    //DEBUG!!
 
       Prev_HdgDeg = IMUHdgValDeg; //re-synch prev to curr hdg for next time
 
@@ -3249,20 +3280,24 @@ bool TurnToHdgDeg(float tgtdeg)
   float currentDeg = UpdateIMUHdgValDeg();
   float turndeg = 0;
 
-  //gl_pSerPort->printf("TurnToHdgDeg: currHdg = %2.1f, tgtHdg = %2.1f, retries = %d \n", currentDeg, tgtdeg, retries);
+  gl_pSerPort->printf("TurnToHdgDeg: currHdg = %2.1f, tgtHdg = %2.1f, retries = %d \n", currentDeg, tgtdeg, retries);
 
   //Step2: determine number of degrees to turn to get to desired heading
-  if (currentDeg * tgtdeg >= 0) //same sign means tgtdeg on same side as currentgeg (0 to 180 or 0 to -179) for sure
+  if (currentDeg * tgtdeg >= 0) //same sign means tgtdeg on same side as currentdeg (0 to 180 or 0 to -179) for sure
   {
     //OK, current & tgt deg have same sign
 #ifdef MPU6050_CCW_INCREASES_YAWVAL
     SpinTurn(tgtdeg > currentDeg, abs(tgtdeg - currentDeg));
 #else
-    SpinTurn(tgtdeg < currentDeg, abs(tgtdeg - currentDeg));
+    gl_pSerPort->printf("TurnToHdgDeg: currHdg = %2.1f, tgtHdg = %2.1f, same-sign block\n", currentDeg, tgtdeg, retries);
+    float turndeg = abs(tgtdeg - currentDeg);
+    gl_pSerPort->printf("TurnToHdgDeg: calling SpinTurn(%s, %3.2f\n", tgtdeg < currentDeg? "true":"false", turndeg);
+    SpinTurn(tgtdeg < currentDeg, turndeg);
 #endif // MPU6050_CCW_INCREASES_YAWVAL
   }
   else
   {
+    gl_pSerPort->printf("TurnToHdgDeg: currHdg = %2.1f, tgtHdg = %2.1f, opposite-sign block\n", currentDeg, tgtdeg, retries);
     //current deg has opposite sign from tgtdeg
     turndeg = currentDeg - tgtdeg;
 
@@ -3283,7 +3318,7 @@ bool TurnToHdgDeg(float tgtdeg)
 #ifdef MPU6050_CCW_INCREASES_YAWVAL
     SpinTurn(turndeg > 0, turndeg);
 #else
-    //gl_pSerPort->printf("TTHD: curr/tgt/turndeg = %2.1f/%2.1f/%2.1f\n", currentDeg, tgtdeg, turndeg);
+    gl_pSerPort->printf("TTHD: curr/tgt/turndeg = %2.1f/%2.1f/%2.1f\n", currentDeg, tgtdeg, turndeg);
     SpinTurn(turndeg > 0, turndeg);
 #endif // MPU6050_CCW_INCREASES_YAWVAL
   }
@@ -3366,6 +3401,7 @@ float GetHdgMatchVal(float tgt_deg, float cur_deg)
   return abs(match_ratio);
 }
 
+ //10/04/26 modified per Grok to properly scale raw IMU headings
 float UpdateIMUHdgValDeg()
 {
   //Purpose: Get latest yaw (heading) value from IMU
@@ -3376,13 +3412,22 @@ float UpdateIMUHdgValDeg()
   //Plan:
   //Step1: check for overflow and reset the FIFO if it occurs. In this case, wait for new packet
   //Step2: read all available packets to get to latest data
-  //Step3: update IMUHdgValDeg with latest value
+  //Step3: 10/05/26: calculate delta from last raw heading value
+  //Step4: 10/05/26: scale delta by correction factor (1/1.27)
+  //Step5: 10/05/26: add scaled delta to last adjusted value to produce current corrected heading
+  //Step6: update IMUHdgValDeg with latest corrected heading after adjusting for 180/-179 split
   //Notes:
   //	10/08/19 changed return type to boolean
   //	10/08/19 no longer need mpuIntStatus
   //	10/21/19 completely rewritten to use Homer's algorithm
   //	05/05/20 changed return type to float vs bool.
   //  06/13/23 added code to update gl_HdgHistoryArray for 'spinning' condx detection
+  //  10/04/26 added Grok code to properly correct raw IMU headings
+
+  //10/04/26 static makes them survive across calls for as long as the Teensy is powered
+  static float prevRawDeg = 0;
+  static float continuousDeg = 0;
+  static bool haveYaw = false;
 
   int flag = GetCurrentFIFOPacket(fifoBuffer, packetSize, MAX_GETPACKET_LOOPS); //get the latest mpu packet
 
@@ -3394,7 +3439,26 @@ float UpdateIMUHdgValDeg()
     mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
 
     //compute the yaw value
-    IMUHdgValDeg = ypr[0] * 180 / M_PI;
+
+    //10/03/26 added fudge factor to synch IMU output with physical reality
+    float rawDeg = ypr[0] * 180.0f / M_PI;   // still -180 to +180
+
+    if (!haveYaw) {
+      prevRawDeg = rawDeg;
+      continuousDeg = 0;    // heading at power-up is 0
+      haveYaw = true;
+    }
+    else {
+      float step = rawDeg - prevRawDeg;
+      if (step > 180.0f)  step -= 360.0f;   // crossed the fold backward
+      if (step < -180.0f) step += 360.0f;   // crossed the fold forward
+      continuousDeg += step * IMU_HDG_CORRECTION_FACTOR; //1.27 is the long scale from the protractor
+      prevRawDeg = rawDeg;
+    }
+
+    IMUHdgValDeg = continuousDeg;
+    while (IMUHdgValDeg > 180.0f)  IMUHdgValDeg -= 360.0f;
+    while (IMUHdgValDeg < -180.0f) IMUHdgValDeg += 360.0f;
   }
 
   //06/13/23 added to update gl_HdgHistoryArray for 'spinning' condx detection
@@ -3409,6 +3473,61 @@ float UpdateIMUHdgValDeg()
 
   return IMUHdgValDeg;//05/05/20 now returns updated value for use convenience
 }
+
+
+
+//float UpdateIMUHdgValDeg()
+//{
+//  //Purpose: Get latest yaw (heading) value from IMU
+//  //Inputs: None.  This function should only be called after mpu.dmpPacketAvailable() returns TRUE
+//  //Outputs: 
+//  //	returns true if successful, otherwise false
+//  //	IMUHdgValDeg updated on success
+//  //Plan:
+//  //Step1: check for overflow and reset the FIFO if it occurs. In this case, wait for new packet
+//  //Step2: read all available packets to get to latest data
+//  //Step3: update IMUHdgValDeg with latest value
+//  //Notes:
+//  //	10/08/19 changed return type to boolean
+//  //	10/08/19 no longer need mpuIntStatus
+//  //	10/21/19 completely rewritten to use Homer's algorithm
+//  //	05/05/20 changed return type to float vs bool.
+//  //  06/13/23 added code to update gl_HdgHistoryArray for 'spinning' condx detection
+//  //  10/04/26 added Grok code to properly scale raw IMU headings
+//
+//  //10/04/26 static makes them survive across calls for as long as the Teensy is powered
+//  static float prevRawDeg = 0;
+//  static float continuousDeg = 0;
+//  static bool haveYaw = false;
+//
+//  int flag = GetCurrentFIFOPacket(fifoBuffer, packetSize, MAX_GETPACKET_LOOPS); //get the latest mpu packet
+//
+//  if (flag != 0) //0 = error exit, 1 = normal exit, 2 = recovered from an overflow
+//  {
+//    // display Euler angles in degrees
+//    mpu.dmpGetQuaternion(&q, fifoBuffer);
+//    mpu.dmpGetGravity(&gravity, &q);
+//    mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+//
+//    //compute the yaw value
+//
+//    //10/03/26 added fudge factor to synch IMU output with physical reality
+//    //IMUHdgValDeg = ypr[0] * 180 / M_PI;
+//    IMUHdgValDeg = IMU_HDG_CORRECTION_FACTOR * ypr[0] * 180 / M_PI;
+//  }
+//
+//  //06/13/23 added to update gl_HdgHistoryArray for 'spinning' condx detection
+//  //all array entries bumped down one, with most recent value at i = HEADING_HISTORY_ARRAY_SIZE-1
+//  for (uint16_t i = 1; i < HEADING_HISTORY_ARRAY_SIZE; i++)
+//  {
+//    gl_HdgHistoryArray[i - 1] = gl_HdgHistoryArray[i];
+//    //gl_pSerPort->printf("gl_HdgHistoryArray[%d] = %2.2f\n", i, gl_HdgHistoryArray[i]);
+//  }
+//  gl_HdgHistoryArray[HEADING_HISTORY_ARRAY_SIZE - 1] = IMUHdgValDeg;
+//
+//
+//  return IMUHdgValDeg;//05/05/20 now returns updated value for use convenience
+//}
 
 uint8_t GetCurrentFIFOPacket(uint8_t* data, uint8_t length, uint16_t max_loops)
 {
