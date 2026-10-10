@@ -22,6 +22,7 @@ TempSketch*
 board.txt
 TeensyOTA1.ttl
 *.vsarduino.h
+firmware/VisionEnhanced4WheelRobot/noboard.txt
 
 # =============================================
 # Python / Pi 5
