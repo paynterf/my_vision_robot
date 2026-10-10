@@ -40,6 +40,10 @@ say "Replacing tmux session '$SESSION'..."
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -n "$SESSION" \
   "bash -lc 'source $JAZZY_SETUP; source $ROS_SETUP; exec python3 -u $WALLE'"
+mkdir -p "$HOME/my_vision_robot/logs"
+: > "$HOME/my_vision_robot/logs/walle-tty.log"  
+tmux pipe-pane -t walle -o "cat >> $HOME/my_vision_robot/logs/walle-tty.log"
+tmux set-option -t walle remain-on-exit on
 sleep 0.5
 
 echo
@@ -48,4 +52,5 @@ echo "  panic:      C  or  5"
 echo "  detach:     Ctrl-b d"
 echo "  walle log:  tail -f ~/my_vision_robot/logs/walle.log"
 echo "  telem log:  tail -f ~/my_vision_robot/logs/telemetry.log"
+echo "  tty log:    tail -f ~/my_vision_robot/logs/walle-tty.log"
 tmux ls

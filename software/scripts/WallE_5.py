@@ -29,6 +29,12 @@ from my_vision_robot_msgs.msg import ClearestDirection
 import queue
 
 teensy_events = queue.Queue()
+heading_events = queue.Queue()
+
+#09/29/26 Added to store latest IMU heading from telemetry
+imu_lock = threading.Lock()
+latest_imu_hdg = None
+last_imu_hdg_t_msec = 0.0
 
 # ----------------------------------------------------------------------
 # Configuration
@@ -54,7 +60,7 @@ NAV_COMMAND_INTERVAL_SEC = 0.8
 NAV_DEADBAND_DEG = 15.0   # was 6.0; includes 0° and ±10° (12:00, 11:00, 1:00)
 NAV_MAX_SPEED_INCREMENT = 1.0 #added 09/03/26
 NAV_DEFAULT_TURN_RATE_DEGPERSEC = 45.0 #must match teensy DEFAULT_TURN_RATE_DEGPERSEC
-NAV_HANDSHAKE_PREFIXES = ("L", "R", "0", "1", "T" )  # add others if firmware blocks on them
+NAV_HANDSHAKE_PREFIXES = ("L", "R", "0", "1", "T", "5" )  # add others if firmware blocks on them
 NAV_SEQ_CONTINUE_ON_FW_ABORT = True
 NAV_TURN_TIMEOUT_MARGIN_SEC = 4.0 #for debugging with Teensy on blocks
 NAV_LOG = Path.home() / "my_vision_robot/logs/nav.log"
@@ -98,6 +104,10 @@ log_level = LOG_INFO
 #09/13/26 Added to prevent nav command lockout after firmware OTA update
 teensy_needs_command_mode = False
 last_repeat_cmd = None   # added to allow repeated 4/6 commands to accumulate heading in a corridor
+
+#latest_clearest_age = -1.0
+latest_clearest_rx = 0.0
+clearest_count = 0
 
 # ----------------------------------------------------------------------
 # Utility
@@ -165,7 +175,7 @@ def send_turn(direction: str, degrees: float, rate: float = None):
 # ----------------------------------------------------------------------
 def telemetry_loop():
     """Read lines from the Teensy and write them cleanly to the telemetry log."""
-    global telemetry_running, ser
+    global telemetry_running, ser, latest_imu_hdg
 
     TELEMETRY_LOG.parent.mkdir(parents=True, exist_ok=True)
 
@@ -179,8 +189,19 @@ def telemetry_loop():
                         logf.flush()
 
                         #pass any nav_seq control lines to the telemetry queue for wait_for_done()
-                        if line.startswith(("DONE ", "ACK ", "BUSY ")):
-                            teensy_events.put(line)
+
+                        body = strip_teensy_ts(line) #added to avoid teensy timestamp in front of DONE/ACK/BUSY lines
+
+                        if body.startswith(("DONE ", "ACK ", "BUSY ")):
+                            teensy_events.put(body)          # queue "DONE H", not "1016295 DONE H"
+
+                        if "IMU Heading" in body:
+                            try:
+                                hdg = float(body.split("=")[1].strip().split()[0])
+                                t_msec = int(line.strip().split(":", 1)[0].split()[0])
+                                set_imu_hdg(hdg, t_msec)
+                            except (ValueError, IndexError):
+                                log(f"bad IMU line: {line!r}")                        
                 except Exception as e:
                     print(f"[telemetry] {e}")
             time.sleep(0.02)# ----------------------------------------------------------------------
@@ -466,8 +487,11 @@ class ClearestDirectionSubscriber(Node):
         self.get_logger().info(f"Subscribed to {NAV_TOPIC}")
 
     def _on_clearest(self, msg: ClearestDirection):
-        global latest_clearest
+        global latest_clearest, latest_clearest_age, latest_clearest_rx
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        latest_clearest_age = self.get_clock().now().nanoseconds * 1e-9 - stamp
         latest_clearest = msg
+        latest_clearest_rx = time.monotonic()
 
 def ros_spin_thread():
     global nav_node
@@ -510,21 +534,21 @@ def apply_nav_from_latest():
     depth = float(msg.best_depth_mm)
     status = int(msg.status)
     in_deadband = abs(turn_deg) < NAV_DEADBAND_DEG
+    log(f"depth={depth:.0f} mm")
+
 
     match status:
         case 0:  # OK
             last_no_data_count = 0
             last_too_close_count = 0
 
-            if in_deadband and last_speed_increment < NAV_MAX_SPEED_INCREMENT:
-                last_speed_increment += 1
+            if in_deadband: #send_nav_cmd now handles speed incrementing and max speed increment
                 send_nav_cmd(
                     "8",
                     f"deadband speed-up (turn_deg={turn_deg:.1f}, depth={depth:.0f} mm)",
                     force=True,
                 )
-            elif in_deadband:
-                return
+
             elif turn_deg < 0:
                 send_nav_cmd(
                     "4",
@@ -538,49 +562,53 @@ def apply_nav_from_latest():
                     force=True,
                 )
 
-        case 1:  # TOO_CLOSE
-            last_too_close_count += 1
+        case 2:  # TOO_CLOSE
+            #last_too_close_count += 1
+            last_too_close_count = TOO_CLOSE_DETECTION_WINDOW + 1
             if last_too_close_count < TOO_CLOSE_DETECTION_WINDOW:
                 return
             last_too_close_count = 0
             send_nav_cmd(
                 "5",
                 f"TOO_CLOSE stop, depth={depth:.0f} mm",
-                force=True,
+                force=True
             )           
             last_speed_increment = 0
 
             if depth < (MIN_BACKUP_CLEAR_DIST_CM * 10.0):
-                send_nav_seq(
-                    [
-                        (".", "reverse"),
-                        ("8", "speed up"),
-                        ("D1", "delay 1s"),
-                        ("5", "stop"),
-                    ],
-                    f"TOO_CLOSE backup, depth={depth:.0f} mm",
-                )
-            #find_clear_direction()
+                
+                log(f"TOO_CLOSE: depth={depth:.0f} mm < {MIN_BACKUP_CLEAR_DIST_CM*10:.0f} mm")
+
+                # send_nav_seq(
+                #     [
+                #         (".", "reverse"),
+                #         ("8", "speed up"),
+                #         ("D1", "delay 1s"),
+                #         ("5", "stop"),
+                #     ],
+                #     f"TOO_CLOSE backup, depth={depth:.0f} mm",
+                # )
+            find_clear_direction()
             send_nav_cmd("8", "resume after TOO_CLOSE", force=True)
 
-        case 2:  # NO_VALID_DATA
-            last_no_data_count += 1
-            if last_no_data_count < NO_DATA_DETECTION_WINDOW:
-                return
-            last_no_data_count = 0
-            send_nav_seq(
-                [
-                    ("5", "stop"),
-                    ("D1", "delay 1s"),
-                    ("L45", "turn"),
-                    ("R90", "turn"),
-                    ("L45", "turn"),
-                    ("D1", "delay 1s"),
-                    ("8", "run"),
-                ],
-                f"NO_DATA, depth={depth:.0f} mm",
-            )
-            last_speed_increment = 0
+        # case 2:  # NO_VALID_DATA
+        #     last_no_data_count += 1
+        #     if last_no_data_count < NO_DATA_DETECTION_WINDOW:
+        #         return
+        #     last_no_data_count = 0
+        #     send_nav_seq(
+        #         [
+        #             ("5", "stop"),
+        #             ("D1", "delay 1s"),
+        #             ("L45", "turn"),
+        #             ("R90", "turn"),
+        #             ("L45", "turn"),
+        #             ("D1", "delay 1s"),
+        #             ("8", "run"),
+        #         ],
+        #         f"NO_DATA, depth={depth:.0f} mm",
+        #     )
+        #     last_speed_increment = 0
 
         case _:
             return
@@ -595,13 +623,12 @@ def enter_teensy_command_menu():
 
 def enter_manual_mode(reason: str = "manual override"):
     """WallE MANUAL: stop AUTO and send inner-menu 5."""
-    # global nav_enabled, last_nav_cmd_sent, last_speed_increment
-    # nav_enabled = False
-    # last_nav_cmd_sent = None
-    # last_speed_increment = 0
-    # send_raw("5")
-    # log(f"MANUAL mode – {reason}")
-    log("Bypassing 'enter_manual_mode()")
+    global nav_enabled, last_nav_cmd_sent, last_speed_increment
+    nav_enabled = False
+    last_nav_cmd_sent = None
+    last_speed_increment = 0
+    send_raw("5")
+    log(f"MANUAL mode – {reason}")
 
 
 
@@ -733,9 +760,14 @@ def wait_for_done(cmd: str, timeout: float):
     """
     Block until Teensy DONE for this cmd, operator abort, or timeout.
     Returns the DONE/ABORT line, or None on timeout.
+
+    Match the command letter after "DONE ", not the full token.
+    Firmware prints "DONE T" for "T79.7", "DONE H" for "H",
+    "DONE L45.00 deg..." for "L45".
     """
     deadline = time.time() + timeout
-    trigger = cmd.strip().split(",")[0]  # "L45" from "L45,30"
+    trigger = cmd.strip().split(",")[0]  # "T79.7" from "T79.7,30"
+    kind = trigger[:1].upper()           # "T", "L", "R", "H", "5"
     while time.time() < deadline:
         if sys.stdin.isatty() and select.select([sys.stdin], [], [], 0)[0]:
             user = sys.stdin.readline().strip().lower()
@@ -743,10 +775,10 @@ def wait_for_done(cmd: str, timeout: float):
                 send_raw("5")
                 log("Operator STOP during wait_for_done")
                 return "ABORT STOP"
-            # if user in ("c", "cmd", "manual"):
-            #     #send_raw("C")
-            #     enter_manual_mode("operator C during wait_for_done")
-            #     return "ABORT MANUAL"
+            if user in ("c", "cmd", "manual"):
+                send_raw("C")
+                enter_manual_mode("operator C during wait_for_done")
+                return "ABORT MANUAL"
         remaining = deadline - time.time()
         if remaining <= 0:
             break
@@ -754,12 +786,12 @@ def wait_for_done(cmd: str, timeout: float):
             line = teensy_events.get(timeout=min(0.1, remaining))
         except queue.Empty:
             continue
-        if line.startswith("DONE ") and trigger in line:
-            return line
-        if line.startswith("DONE ") and "ABORT" in line:
-            return line
+        body = line.strip()
+        if body.startswith("DONE ABORT"):
+            return body
+        if body.startswith("DONE ") and kind and body[5:].startswith(kind):
+            return body
     return None
-
 
 def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = False) -> bool:
     """
@@ -768,8 +800,11 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
     wait=True: block until Teensy DONE/ABORT or timeout.
     wait=False (default): fire-and-forget (vision nudges 4/6/8/5).
     Returns False if a waited motion timed out or was aborted.
+    09/26/26: Added last_speed_increment logic to prevent '8' being sent too often
     """
-    global last_nav_cmd_sent, last_nav_cmd_time
+    global last_nav_cmd_sent, last_nav_cmd_time, last_speed_increment
+    print(f"send_nav_cmd: cmd={cmd}, reason={reason}, force={force}, wait={wait}")
+
 
     cmd = (cmd or "").strip()
     if not cmd:
@@ -798,7 +833,19 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
     if wait:
         drain_teensy_events()
 
-    send_raw(cmd)
+    #09/26/26 watch out for '8' (speed-up) being sent too often
+    if cmd == "8":
+        if last_speed_increment < NAV_MAX_SPEED_INCREMENT:
+            last_speed_increment += 1
+            print(f"last_speed_increment increased to {last_speed_increment}")
+            send_raw(cmd)
+
+    elif cmd in ("4", "6"):
+        send_raw(cmd)
+        log_heading_after_tweak(cmd, reason)
+    else:
+        send_raw(cmd)
+    
     last_nav_cmd_time = time.time()
     last_nav_cmd_sent = cmd
     if LOG_LEVEL >= LOG_INFO:
@@ -834,6 +881,126 @@ def send_nav_seq(steps, reason):
             nav_enabled = False
             break
 
+def find_clear_direction():
+    """Try to find a clear direction by rotating 360 degrees while recording 'best-direction'.
+       and heading for each step. Then turn to the best direction and resume forward motion."""
+    global nav_enabled
+    
+    hdg = get_current_imu_hdg()
+
+    log(f"Finding clear direction starting at heading {hdg}°...")
+    steps = [
+        ("5", "stop"),
+        ("D1", "delay 1s"),
+        (".", "set motors to reverse"),
+        ("8", "move backward 1s"),
+        ("D1", "delay 1s"),
+        ("5", "stop"),
+        ("D1", "delay 1s"),
+    ]
+    send_nav_seq(steps, "preparing to find clear direction")
+    
+    catalog = [] #must exist before the loop to avoid dreaded 'NameError'
+
+    #send_nav_cmd("H", "get heading before scan", force=True, wait=True)
+    hdg = get_current_imu_hdg()
+    log(f"find_clear_direction: before start → heading {hdg}°")
+
+    send_nav_cmd("D1", "pause before scan", force=True, wait=True)
+
+    # for deg in range(0, 360, 45):
+    #     send_nav_cmd("L45", f"find_clear_direction turn {deg}°", force=True, wait=True)
+    #     hdg = get_current_imu_hdg()
+    #     time.sleep(0.5)  # allow vision to update
+    #     if latest_clearest is not None:
+    #         depth = latest_clearest.best_depth_mm
+    #         age = time.monotonic() - latest_clearest_rx
+    #     else:
+    #         depth = 0.0
+    #         age = -1.0
+
+    #10/06/26: Added to command a heading query after each L45 turn.
+    log("Recording depths around the compass ...")
+    steps = [
+        ("L45", "turn"),
+        ("D1", "delay 1s"),
+    ]
+
+#    for deg in range(0, 360, 45):
+    for deg in range(45, 360, 45):
+        # send_nav_cmd("L45", f"find_clear_direction turn {deg}°", force=True, wait=True)
+        send_nav_seq(steps, f"find_clear_direction turn {deg}°")
+        hdg = get_current_imu_hdg()
+        log(f"find_clear_direction: turn {deg}° → heading {hdg}°")
+        time.sleep(0.5)  # allow vision to update
+        if latest_clearest is not None:
+            depth = latest_clearest.best_depth_mm
+            age = time.monotonic() - latest_clearest_rx
+        else:
+            depth = 0.0
+            age = -1.0
+
+            
+        catalog.append((hdg, depth, age))
+
+    log(f"find_clear_direction: heading {hdg}°, best_depth_mm={depth:.0f}, frame_age={age:.3f}s")
+ 
+    best_hdg, best_dist, best_age = max(catalog, key=lambda sample: sample[1])
+    log(f"find_clear: best heading={best_hdg}°  depth={best_dist:.0f} mm  frame_age={best_age:.3f}s")
+
+    send_nav_cmd("5", "stop after 360° scan", force=True, wait=True)
+    send_nav_cmd("D5", "delay 5s", force=True, wait=True)
+
+    # print(catalog)
+    log("find_clear_direction catalog: [" +
+    ", ".join(f"({h:.1f}, {d:.1f}, {a:.3f}s)" for h, d, a in catalog) + "]")
+
+    send_nav_cmd(f"T{best_hdg:.1f}", f"turn to best heading {best_hdg}°", force=True, wait=True)
+    send_nav_cmd("8", "resume forward motion", force=True, wait=False)
+           
+#added 09/29/26 to manage teensy heading telemetry and avoid race conditions with latest_imu_hdg
+def set_imu_hdg(hdg, t_msec):
+    global latest_imu_hdg, last_imu_hdg_t_msec
+    with imu_lock:
+        latest_imu_hdg = hdg
+        last_imu_hdg_t_msec = t_msec
+
+def get_current_imu_hdg(timeout=0.5):
+    global latest_imu_hdg, last_imu_hdg_t_msec
+
+    with imu_lock:
+        prev_ms = last_imu_hdg_t_msec
+
+    send_nav_cmd("H", "query heading", force=True, wait=True)  # ACK/DONE H
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with imu_lock:
+            hdg, ms = latest_imu_hdg, last_imu_hdg_t_msec
+        if ms is not None and (prev_ms is None or ms > prev_ms):
+            return hdg
+        time.sleep(0.02)
+
+    log("get_current_imu_hdg: no newer Teensy IMU timestamp")
+    return None
+
+def strip_teensy_ts(line: str) -> str:
+    s = line.strip()
+    # "1016295 DONE H"  or  "1016294: IMU Heading = -1.35 Deg"
+    if s[:1].isdigit():
+        i = 0
+        while i < len(s) and s[i].isdigit():
+            i += 1
+        if i < len(s) and s[i] in ":\t ":
+            s = s[i+1:].lstrip()
+    return s    
+
+def log_heading_after_tweak(cmd: str, reason: str):
+    """4 and 6 do not wait. Pause, then ask Teensy for the heading they stopped on."""
+    time.sleep(1)
+    hdg = get_current_imu_hdg()
+    log(f"tweak {cmd} ({reason}): IMU heading {hdg}")
+   
 
 # ----------------------------------------------------------------------
 # Main
@@ -852,7 +1019,7 @@ def main():
     NAV_LOG.parent.mkdir(parents=True, exist_ok=True)
     print(f"Supervisor log: {NAV_LOG}")
     rotate_nav_logs()
-    #print("In another terminal:  tail -f ~/my_vision_robot/logs/nav.log\n")
+    print("In another terminal:  tail -f ~/my_vision_robot/logs/nav.log\n")
 
     # 1. Serial
     if not open_serial():
@@ -930,14 +1097,17 @@ def main():
 
         if low in ("quit", "exit", "q"):
             break
-        elif low in ("help", "h", "?", "c"):
-            print_help()
-        # elif low in ("c", "cmd", "manual"):
-        #     log(f"Received {user}: Entering MANUAL mode")
-        #     enter_manual_mode("operator C / manual")
-        #     last_repeat_cmd = None
-            #nav_enabled = False #added 09/22/26
+        elif low in ("h", "heading request"):
+            send_raw("h")
+            last_repeat_cmd = None 
+        #     print_help()
+        elif low in ("c", "cmd", "manual"):
+            log(f"Received {user}: Entering MANUAL mode")
+            enter_manual_mode("operator C / manual")
+            last_repeat_cmd = None
+            nav_enabled = False #added 09/22/26
         elif low in ("auto", "nav"):
+            print("Resuming AUTO navigation...")
             enter_auto_mode("operator resume auto-nav")
             last_repeat_cmd = None
         elif low in ("5", "stop"):
