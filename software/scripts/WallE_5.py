@@ -1001,7 +1001,46 @@ def log_heading_after_tweak(cmd: str, reason: str):
     hdg = get_current_imu_hdg()
     log(f"tweak {cmd} ({reason}): IMU heading {hdg}")
    
+def run_freshness_test():
+    """Direct 3-position freshness test.
+       Position the robot 45° CW of the doorway first, then type 'auto'.
+       Logs all three reads at each of the three headings.
+       No catalog selection, no T command, no return to normal nav."""
+    log("=== Freshness test starting (expect start = 45° CW of doorway) ===")
 
+    def sample_three(label):
+        for i in range(3):
+            if latest_clearest is not None:
+                depth = latest_clearest.best_depth_mm
+                sector = latest_clearest.best_sector
+                turn = latest_clearest.turn_deg
+                age = time.monotonic() - latest_clearest_rx
+            else:
+                depth, sector, turn, age = 0.0, -1, 0.0, -1.0
+            log(f"  {label} read {i+1}: depth={depth:.0f} mm  sector={sector}  turn={turn:.1f}°  age={age:.3f}s")
+            if i < 2:
+                time.sleep(0.3)
+
+    # Position 0: starting heading (one stop CW of doorway)
+    hdg = get_current_imu_hdg()
+    log(f"Position 0 (before): heading {hdg}°")
+    time.sleep(0.5)
+    sample_three("pos0")
+
+    # Two L45 steps → at doorway, then one stop past
+    steps = [
+        ("L45", "turn"),
+        ("D1", "delay 1s"),
+    ]
+    for step in (1, 2):
+        send_nav_seq(steps, f"freshness L45 step {step}")
+        hdg = get_current_imu_hdg()
+        log(f"Position {step} (after L45 #{step}): heading {hdg}°")
+        time.sleep(0.5)
+        sample_three(f"pos{step}")
+
+    log("=== Freshness test complete — robot stopped ===")
+    send_nav_cmd("5", "stop after freshness test", force=True, wait=True)
 # ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
@@ -1107,9 +1146,9 @@ def main():
             last_repeat_cmd = None
             nav_enabled = False #added 09/22/26
         elif low in ("auto", "nav"):
-            print("Resuming AUTO navigation...")
-            enter_auto_mode("operator resume auto-nav")
-            last_repeat_cmd = None
+            print("Running freshness test...")
+            run_freshness_test()
+            last_repeat_cmd = None        
         elif low in ("5", "stop"):
             send_raw("5")
             last_repeat_cmd = None
