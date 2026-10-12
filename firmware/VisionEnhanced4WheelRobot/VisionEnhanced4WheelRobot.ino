@@ -67,9 +67,9 @@ const uint16_t WALL_TRACK_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE;//10/02/22
 //const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = 250; //10/02/22 added to separate out slow front LIDAR from faster VL53L1X sensors
 const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE; //03/15/23 Garmin LIDAR can easily keep up with other sensors
 const uint16_t TURN_RATE_UPDATE_INTERVAL_MSEC = 30; //30 mSec is as fast as it can go
-//const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 100; //added 09/25/23
+const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 100; //added 09/25/23
 //const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 500; //09/21/26
-const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 2000; //10/03/26
+//const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 2000; //10/03/26
 const uint32_t TELEMETRY_HEADER_PRINT_INTERVAL_MSEC = 50 * TELEMETRY_PRINT_INTERVAL_MSEC; //added 09/01/26
 //#define IMU_HDG_CORRECTION_FACTOR 0.787401575 //added 10/03/26 this is 1/1.27, where 1.27 was derived from protractor vs IMUHdgDegVal readings
 #define IMU_HDG_CORRECTION_FACTOR 0.753405824 //rev 10/07/26 for better correction
@@ -3118,6 +3118,7 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
   {
     //11/06/20 now just loops between PID calcs
     CheckForUserInput();
+    gl_pSerPort->printf("RearCm = %3.2f\n", (float)lidar_Rear.read() / 10.0);
 
     if (MsecSinceLastTurnRateUpdate >= TURN_RATE_UPDATE_INTERVAL_MSEC)
     {
@@ -3283,8 +3284,8 @@ bool TurnToHdgDeg(float tgtdeg)
   gl_pSerPort->printf("TurnToHdgDeg: currHdg = %2.1f, tgtHdg = %2.1f, retries = %d \n", currentDeg, tgtdeg, retries);
 
   //Step2: determine number of degrees to turn to get to desired heading
-  if (currentDeg * tgtdeg >= 0) //same sign means tgtdeg on same side as currentdeg (0 to 180 or 0 to -179) for sure
-  {
+  if (currentDeg * tgtdeg >= 0)//same sign means tgtdeg on same side as currentdeg (0 to 180 or 0 to -179) for sure
+  { 
     //OK, current & tgt deg have same sign
 #ifdef MPU6050_CCW_INCREASES_YAWVAL
     SpinTurn(tgtdeg > currentDeg, abs(tgtdeg - currentDeg));
@@ -3473,8 +3474,6 @@ float UpdateIMUHdgValDeg()
 
   return IMUHdgValDeg;//05/05/20 now returns updated value for use convenience
 }
-
-
 
 //float UpdateIMUHdgValDeg()
 //{
@@ -4157,9 +4156,8 @@ void SendTelemetry()
   return;
 #endif
   //added 10/23/20 for rear sensor
-#ifdef VL53L1X
+#ifndef NO_VL53L1X
   gl_RearCm = (float)lidar_Rear.read() / 10.0;
-  //gl_pSerPort->printf("gl_RearCm = %2.2f\n", gl_RearCm);
   UpdateRearDistanceArray(gl_RearCm);
   float rearVar = CalcBruteRearDistArrayVariance();
 #else

@@ -24,6 +24,9 @@ TeensyOTA1.ttl
 *.vsarduino.h
 firmware/VisionEnhanced4WheelRobot/noboard.txt
 
+#Paynter's Palace Post Material/*
+/firmware/VisionEnhanced4WheelRobot/Post Material/
+
 # =============================================
 # Python / Pi 5
 # =============================================
@@ -105,7 +108,4 @@ depth_*.png
 # Temporary backup folders
 backup_*/
 backup_scripts_*/
-/firmware/VisionEnhanced4WheelRobot/Post Material/*.mp4
-/firmware/VisionEnhanced4WheelRobot/Post Material/*.MOV
-/firmware/VisionEnhanced4WheelRobot/Post Material/*.JPG
 .vscode/
