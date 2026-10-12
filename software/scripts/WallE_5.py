@@ -51,7 +51,7 @@ MAX_AGE_SECONDS = 300            # 5 minutes
 
 # Telemetry log file
 TELEMETRY_LOG = Path.home() / "my_vision_robot/logs/telemetry.log"
-TELEMETRY_LOG_MAX_DAYS = 3 #open this back up to 30 days if you want to keep more history, but it will take up more space
+TELEMETRY_LOG_MAX_DAYS = 2 #open this back up to 30 days if you want to keep more history, but it will take up more space
 SECONDS_PER_DAY = 86400 #24 * 60 * 60
 
 # Navigation (clearest-direction)
@@ -64,7 +64,7 @@ NAV_HANDSHAKE_PREFIXES = ("L", "R", "0", "1", "T", "5" )  # add others if firmwa
 NAV_SEQ_CONTINUE_ON_FW_ABORT = True
 NAV_TURN_TIMEOUT_MARGIN_SEC = 4.0 #for debugging with Teensy on blocks
 NAV_LOG = Path.home() / "my_vision_robot/logs/nav.log"
-NAV_LOG_MAX_DAYS = 3 * SECONDS_PER_DAY #open this back up to 30 days if you want to keep more history, but it will take up more space
+NAV_LOG_MAX_DAYS = 2 * SECONDS_PER_DAY #open this back up to 30 days if you want to keep more history, but it will take up more space
 
 # Startup / auto-nav (default = drive; C = manual override)
 AUTO_NAV_ON_START = False

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 clearest_direction_node.py
-Analyzes the bottom half of the depth image and publishes the clearest direction.
+Analyzes the middle  of the depth image and publishes the clearest direction.
 Does NOT talk to the Teensy – that is WallE_5.py’s job.
 """
 
@@ -50,7 +50,13 @@ class ClearestDirectionNode(Node):
 
     def depth_callback(self, msg):
         depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-        depth_bottom = depth[self.bottom_half_start:, :]
+        # was:
+        # depth_bottom = depth[self.bottom_half_start:, :]
+
+        h, w = depth.shape[:2]
+        top = h // 3
+        bottom = 2 * h // 3
+        depth_band = depth[top:bottom, :]
 
         best_sector_idx = -1
         best_avg = -1.0
@@ -58,7 +64,7 @@ class ClearestDirectionNode(Node):
         for i in range(self.num_sectors):
             start_col = i * self.sector_width
             end_col = (i + 1) * self.sector_width if i < self.num_sectors - 1 else self.image_width
-            sector_data = depth_bottom[:, start_col:end_col]
+            sector_data = depth_band[:, start_col:end_col]
 
             valid_mask = sector_data > 0
             valid_count = np.sum(valid_mask)
