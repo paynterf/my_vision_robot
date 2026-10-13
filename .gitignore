@@ -70,6 +70,12 @@ Thumbs.db
 *.pdf
 *.docx
 !docs/**/*.docx
+!docs/**/*.xlsx
+!docs/**/*.jpg
+!docs/**/*.jpeg
+!docs/**/*.png
+!docs/**/*.docx
+!docs/**/*.pdf
 ~$*.docx
 *.xlsx
 
