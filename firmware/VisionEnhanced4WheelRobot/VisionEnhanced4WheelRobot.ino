@@ -55,7 +55,7 @@ extern "C"
 //#pragma region PRE_SETUP
 MPU6050 mpu(MPU6050_I2C_ADDR);
 uint32_t buffer_addr, buffer_size;
-VL53L1X lidar_Rear;
+VL53L1X lidar_Front;
 TeePrint tee(Serial, Serial1);
 
 
@@ -67,7 +67,7 @@ const uint16_t WALL_TRACK_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE;//10/02/22
 //const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = 250; //10/02/22 added to separate out slow front LIDAR from faster VL53L1X sensors
 const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE; //03/15/23 Garmin LIDAR can easily keep up with other sensors
 const uint16_t TURN_RATE_UPDATE_INTERVAL_MSEC = 30; //30 mSec is as fast as it can go
-const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 100; //added 09/25/23
+const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 1000; //added 09/25/23
 //const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 500; //09/21/26
 //const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 2000; //10/03/26
 const uint32_t TELEMETRY_HEADER_PRINT_INTERVAL_MSEC = 50 * TELEMETRY_PRINT_INTERVAL_MSEC; //added 09/01/26
@@ -94,7 +94,8 @@ const float VOLTAGE_TO_CURRENT_RATIO = 1.f; //Used for both 'Total' and 'Run' se
 
 #pragma region TELEMETRYSTRINGS
 //const char* LoopTelemHdrStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg";
-const char* LoopTelemHdrStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg\t\tLspd\tRspd";
+//const char* LoopTelemHdrStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg\t\tLspd\tRspd";
+const char* LoopTelemHdrStr = "Time\tBattV\tTopI\tBotI\tChgI\tFrontCm\tFrontVar\tHdg\t\tLspd\tRspd";
 const char* IRHomingTelemStr = "Time\tBattV\tFin1\tFin2\tSteer\tPID_Out\t\tLSpd\tRSpd\tFrontD\tRearD";
 const char* IRHomingTelemStrNoPings = "Time\tBattV\tFin1\tFin2\tSteer\tPID_Out\t\tLSpd\tRSpd\n";
 
@@ -167,7 +168,6 @@ const uint16_t FRONT_DIST_AVG_WINDOW_SIZE = 3; //moved here & renamed 04/28/19
 const uint16_t LR_DIST_ARRAY_SIZE = 3; //04/28/19 added to reinstate l/r dist running avg
 const uint16_t LR_AVG_WINDOW_SIZE = 3; //added 04/28/19 so front & lr averages can differ
 const uint16_t STUCK_FRONT_VARIANCE_THRESHOLD = 50; //chg to 50 04/28/17
-const uint16_t STUCK_REAR_VARIANCE_THRESHOLD = 50; //added 01/08/22
 const uint16_t NO_LIDAR_FRONT_VAR_VAL = 10 * STUCK_FRONT_VARIANCE_THRESHOLD; //01/16/19
 
 //04/28/19 added to reinstate l/r dist running avg
@@ -189,7 +189,7 @@ const uint16_t REAR_DIST_ARRAY_SIZE = FRONT_DIST_ARRAY_SIZE; //09/30/23 made equ
 const uint16_t AVG_HDG_ARRAY_SIZE = (uint16_t)1000 * AVG_HDG_TIME_FRAME_SEC / MSEC_PER_DIST_UPDATE;
 
 //04/18/19 rev to use float vs int
-uint16_t aFrontDistCM[STUCK_ARRAY_SIZE];
+float aFrontDistCM[STUCK_ARRAY_SIZE];
 float aLeftDistCM[LR_DIST_ARRAY_SIZE];
 float aRightDistCM[LR_DIST_ARRAY_SIZE];
 float aRearDistCM[STUCK_ARRAY_SIZE];
@@ -199,7 +199,6 @@ float aAvgHdgDeg[AVG_HDG_ARRAY_SIZE];
 const uint16_t MAX_MOVE_TO_DIST_ERROR_PCT = 5;
 
 #pragma endregion Distance Measurement Support
-
 
 #pragma region PIN ASSIGNMENTS
 #pragma region MOTOR PINS
@@ -349,7 +348,6 @@ bool RollingTurn(bool b_ccw, bool b_fwd, float numDeg, float Kp, float Ki, float
 
 #pragma endregion HEADING_AND_RATE_BASED_TURN_PARAMETERS
 
-
 #pragma region GLOBAL_VARIABLES
 float gl_batteryVoltage;
 uint16_t gl_Leftspeednum = MOTOR_SPEED_OFF;
@@ -362,13 +360,12 @@ uint16_t gl_Rightspeednum = MOTOR_SPEED_OFF;
 //int16_t gl_FinalRightSpeed = 0;
 
 //02/15/22 added from FourWD_WallE2_V12.ino
-uint16_t gl_FrontCm = 0;
-float gl_Rearvar = 0;//chg to float 03/23/22
+float gl_Frontvar = 0;//chg to float 03/23/22
 bool gl_bChgConnect = false;
 
 //Sensor data values
 //03/01/22 rev to store all dists in cm vs mm
-float gl_RearCm; //added 10/24/20
+float gl_FrontCm; //added 10/24/20
 //Stream* gl_pSerPort = 0; //09/26/22 made global so can use everywhere.
 Print* gl_pSerPort = 0; //09/26/22 made global so can use everywhere.
 float gl_ElapsedSec = 0; //03/18/23
@@ -389,12 +386,8 @@ float gl_AvgHeadingDeg;
 
 //added 10/08/23 for QuickSort()
 const uint16_t QUICKSORT_ARRAY_SIZE = 36;
-uint16_t FrontD[QUICKSORT_ARRAY_SIZE];
+float FrontD[QUICKSORT_ARRAY_SIZE];
 float Hdg[QUICKSORT_ARRAY_SIZE];
-float RightD[QUICKSORT_ARRAY_SIZE];
-float LeftD[QUICKSORT_ARRAY_SIZE];
-float RightSteer[QUICKSORT_ARRAY_SIZE];
-float LeftSteer[QUICKSORT_ARRAY_SIZE];
 const uint16_t MIN_RUN_TO_DAYLIGHT_DIST_CM = 150;//added 10/14/23
 
 unsigned long prevTime = 0;
@@ -619,13 +612,13 @@ void setup()
   Wire.begin();
   Wire.setClock(400000);
 
-  // Use Wire1 instead of Wire for rear LIDAR
+  // Use Wire1 instead of Wire for FRONT_LIDAR
   Wire1.begin();
   Wire1.setClock(400000);
 
 #pragma endregion I2C_PORTS
 
-#pragma region REAR LIDAR
+#pragma region FRONT_LIDAR
 #ifndef NO_VL53L1X
 
   // Reset the sensor
@@ -635,10 +628,10 @@ void setup()
   digitalWrite(XSHUT_PIN, HIGH);
   delay(20);
 
-  lidar_Rear.setBus(&Wire1);          // <-- this is the key line
-  lidar_Rear.setTimeout(500);
+  lidar_Front.setBus(&Wire1);          // <-- this is the key line
+  lidar_Front.setTimeout(500);
 
-  if (!lidar_Rear.init())
+  if (!lidar_Front.init())
   {
     Serial.println("Failed to detect and initialize VL53L1X on Wire1!");
     while (1);
@@ -646,18 +639,18 @@ void setup()
 
   Serial.println("VL53L1X detected on Wire1 and initialized");
 
-  lidar_Rear.setDistanceMode(VL53L1X::Long);
-  lidar_Rear.setMeasurementTimingBudget(50000);
-  lidar_Rear.startContinuous(50);
+  lidar_Front.setDistanceMode(VL53L1X::Long);
+  lidar_Front.setMeasurementTimingBudget(50000);
+  lidar_Front.startContinuous(50);
 
 #endif // NO_VL53L1X
-  gl_pSerPort->printf(F("Initializing Rear Distance Array..."));
-  InitRearDistArray();
+  gl_pSerPort->printf(F("Initializing Front Distance Array..."));
+  //InitRearDistArray();
+  InitFrontDistArray();
   gl_pSerPort->println(F("Done"));
 
 
-
-#pragma endregion REAR LIDAR
+#pragma endregion FRONT_LIDAR
 
   CheckForUserInput(); //01/13/22 - here so OTA procedure can maybe start faster
   // 03/06/23 commented out - Garmin LIDAR won't connect on Wire2 with these lines active
@@ -737,9 +730,9 @@ void setup()
 
   mSecSinceLastTelemetryHeader = 0;
   mSecSinceLastTelemetryUpdate = 0;
-#ifndef NO_TELEMETRY
-  gl_pSerPort->println(LoopTelemHdrStr);
-#endif
+//#ifndef NO_TELEMETRY
+//  gl_pSerPort->println(LoopTelemHdrStr);
+//#endif
 }
 
 void loop()
@@ -762,15 +755,19 @@ void loop()
     }
     SendTelemetry();
   }
-//  if (mSecSinceLastTelemetryHeader >= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC)
-//  {
-//    mSecSinceLastTelemetryHeader -= TELEMETRY_HEADER_PRINT_INTERVAL_MSEC;
-//#ifndef NO_TELEMETRY
-//    gl_pSerPort->println(LoopTelemHdrStr);
-//#endif
-//  }
 
-  delay(400); //08/17/23 put in to make sure distances are current
+  UpdateAllEnvironmentParameters(); //added 10/13/26
+
+#ifndef NO_STUCK
+  if (IsStuckAhead())
+  {
+    gl_pSerPort->printf("Stuck Ahead Detected at %lu: gl_FrontCm = %2.1f, FrontVar = %2.1f\n", millis(), gl_FrontCm, gl_Frontvar);
+  }
+#endif // NO_STUCK
+
+  //delay(200); //08/17/23 put in to make sure distances are current
+  delay(MSEC_PER_DIST_UPDATE); //08/17/23 put in to make sure distances are current
+
 }
 
 
@@ -3118,7 +3115,7 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
   {
     //11/06/20 now just loops between PID calcs
     CheckForUserInput();
-    gl_pSerPort->printf("RearCm = %3.2f\n", (float)lidar_Rear.read() / 10.0);
+    gl_pSerPort->printf("RearCm = %3.2f\n", GetFrontDistCm());
 
     if (MsecSinceLastTurnRateUpdate >= TURN_RATE_UPDATE_INTERVAL_MSEC)
     {
@@ -3463,7 +3460,7 @@ float UpdateIMUHdgValDeg()
   }
 
   //06/13/23 added to update gl_HdgHistoryArray for 'spinning' condx detection
-  //all array entries bumped down one, with most recent value at i = HEADING_HISTORY_ARRAY_SIZE-1
+  //all array entries bumped up one, with most recent value at i = HEADING_HISTORY_ARRAY_SIZE-1
   for (uint16_t i = 1; i < HEADING_HISTORY_ARRAY_SIZE; i++)
   {
     gl_HdgHistoryArray[i - 1] = gl_HdgHistoryArray[i];
@@ -3892,6 +3889,8 @@ void InitHeadingHistoryArray()
   }
 
 }
+
+
 #pragma endregion HDG_BASED_TURN_SUPPORT
 
 #pragma region MISCELLANEOUS
@@ -4066,7 +4065,7 @@ void InitRearDistArray()
     }
   }
 
-  //04/19/19 init gl_Rearmean  & gl_Rearvar to mean/var respectively
+  //04/19/19 init gl_Rearmean  & gl_Frontvar to mean/var respectively
   long sum = 0;
   for (int i = 0; i < REAR_DIST_ARRAY_SIZE; i++)
   {
@@ -4083,8 +4082,8 @@ void InitRearDistArray()
     sumsquares += (aRearDistCM[i] - mean) * (aRearDistCM[i] - mean);
   }
 
-  gl_Rearvar = sumsquares / REAR_DIST_ARRAY_SIZE;
-  //gl_pSerPort->printf("%lu: aRearDistCM Init: mean = %3.2f, gl_Rearvar = %3.2f\n", millis(), mean, gl_Rearvar);
+  gl_Frontvar = sumsquares / REAR_DIST_ARRAY_SIZE;
+  //gl_pSerPort->printf("%lu: aRearDistCM Init: mean = %3.2f, gl_Frontvar = %3.2f\n", millis(), mean, gl_Frontvar);
 
   //DEBUG!!
   //gl_pSerPort->printf("Initial Rear Distance Array Contents\n");
@@ -4095,7 +4094,6 @@ void InitRearDistArray()
   //}
   //DEBUG!!
 }
-
 
 uint16_t UpdateRearDistanceArray(uint16_t newdistval)
 {
@@ -4149,6 +4147,74 @@ float  CalcBruteRearDistArrayVariance()
   return brute_var;
 }
 
+bool IsStuckAhead()
+{
+  //Purpose:  Determine if robot is stuck in rear direction
+  //Inputs:
+  //  gl_Frontvar = uint16_t denoting current rear variance value
+  //  gl_RearCm = uint16_t denoting current rear distance (cm)
+  //  05/28/24 removed motor direction/speed condition
+
+  //return (gl_Frontvar < STUCK_REAR_VARIANCE_THRESHOLD)
+  //  && (gl_RearCm < MAX_REAR_DISTANCE_CM) &&
+  //  !IsLeftMotorForward() && !IsRightMotorForward();
+  return (gl_Frontvar < STUCK_FRONT_VARIANCE_THRESHOLD)
+    && (gl_FrontCm < MAX_REAR_DISTANCE_CM);
+}
+
+void UpdateAllEnvironmentParameters()
+{
+  //Purpose: Update all 'global' distance measurements, distance arrays, variances and anomaly variables
+  //Provenance: Created 03/07/22
+  //Inputs:
+  // Left/Right/Rear/Front distance sensors
+  //Outputs:
+  // left rear/ctr/front, right rear/ctr/front, rear, front distance vars updated
+  // Front and Rear variance vars updated
+  // All boolean anomaly detection states updated
+  //Plan:
+  //  Step1: Update all left/right/rear/front distances
+  //  Step2: Update all distance arrays
+  //  Step3: Update both front and rear variance calcs
+  //  Step4: Update all anomaly detection boolean vars
+  //Notes:
+  //  03/07/22 another attempt to corral the updates to 'global' environment vars
+  //  08/20/23 repl all 'gl_bXXX = ' with 'if(???) gl_LastAnomalyCode = ANOMALY_XXX;'
+  //  09/03/23 added UpdateIMUHdgValDeg() call 
+  //  05/19/24 just discovered that ANOMALY_WALL_OFFSET_DIST_AHEAD anomaly isn't cleared when the robot moves from
+  //    inside the offset distance to outside - ouch!  Added 'else {gl_LastAnomalyCode = ANOMALY_NONE}' to bottom of checks.
+  //  05/19/24 bugfix: chg 'gl_FrontCm < REAR_OBSTACLE_DETECTION_DIST_CM' to 'gl_RearCm < REAR_OBSTACLE_DETECTION_DIST_CM'
+// 
+  //DEBUG!!
+  //gl_pSerPort->printf("%lu: Top of UpdateAllEnvironmentParameters(%s) with anomaly code = %s\n", millis(), WallTrackStrArray[trkdir], AnomalyStrArray[gl_LastAnomalyCode]);
+  //DEBUG!!
+
+  //digitalWrite(DURATION_MEASUREMENT_PIN1, HIGH);//start measurement pulse
+
+  //Step1: Update all left/right/rear/front distances
+  //UpdateAllDistances();
+
+  UpdateIMUHdgValDeg(); //added 09/03/23
+
+  //gl_AvgHeadingDeg = UpdateAvgHdgArray(IMUHdgValDeg);
+
+  //gl_pSerPort->printf("in UpdateAllEnv()\n");
+  //gl_pSerPort->printf("Front\tRear\tLeftCtr\tRtCtr\n");
+  //gl_pSerPort->printf("%d\t%2.1f\t%2.1f\t%2.1f\n", gl_FrontCm, gl_RearCm, gl_LeftCenterCm, gl_RightCenterCm);
+
+  ////Step2: Update all distance arrays
+  // 05/19/22 no longer using incremental calcs, so no need for oldestfront/reardistval
+  //UpdateFrontDistanceArray(gl_FrontCm);
+  gl_FrontCm = GetFrontDistCm();
+  UpdateFrontDistanceArray(gl_FrontCm);
+
+  //Step3: Update both front and rear variance calcs
+  //gl_Frontvar = CalcBruteFrontDistArrayVariance();//05/19/22 bugfix
+  gl_Frontvar = CalcBruteFrontDistArrayVariance();//05/19/22 bugfix
+
+  //gl_pSerPort->printf("%lu: Bottom of UpdateAllEnvironmentParameters(%s) with anomaly code = %s\n", millis(), WallTrackStrArray[trkdir], AnomalyStrArray[gl_LastAnomalyCode]);
+}
+
 
 void SendTelemetry()
 {
@@ -4157,14 +4223,16 @@ void SendTelemetry()
 #endif
   //added 10/23/20 for rear sensor
 #ifndef NO_VL53L1X
-  gl_RearCm = (float)lidar_Rear.read() / 10.0;
-  UpdateRearDistanceArray(gl_RearCm);
-  float rearVar = CalcBruteRearDistArrayVariance();
+  gl_FrontCm = GetFrontDistCm();
+  //UpdateRearDistanceArray(gl_FrontCm);
+  UpdateFrontDistanceArray(gl_FrontCm);
+  //float rearVar = CalcBruteRearDistArrayVariance();
+  float frontVar = CalcBruteFrontDistArrayVariance();
 #else
   float rearVar = 0;
 #endif // !VL53L1X
 
-  //gl_pSerPort->printf("gl_RearCm = %2.2f, CalcBruteRearDistArrayVariance() returned %2.2f\n", gl_RearCm, rearVar);
+  //gl_pSerPort->printf("gl_FrontCm = %2.2f, CalcBruteRearDistArrayVariance() returned %2.2f\n", gl_FrontCm, rearVar);
   float BattV = GetVoltage(SW_BATT_VOLT_PIN);
   float TopI = GetAmps(I_TOP_PIN);
   float BotI = GetAmps(I_BOT_PIN);
@@ -4172,9 +4240,627 @@ void SendTelemetry()
 
   UpdateIMUHdgValDeg(); //updates IMUHdgValDeg
 
-  //const char* LoopTelemHdrStr = "Time\tBattV\tTopI\tBotI\tChgI\tRearCm\tRearVar\tHdg\t\tLspd\tRspd";
-  gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%d\t\t%d\n", millis(), BattV, TopI, BotI, ChgI, gl_RearCm, rearVar, IMUHdgValDeg, gl_Leftspeednum, gl_Rightspeednum);
+  //const char* LoopTelemHdrStr = "Time\tBattV\tTopI\tBotI\tChgI\tFrontCm\tFrontVar\tHdg\t\tLspd\tRspd";
+  gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%d\t\t%d\n", millis(), BattV, TopI, BotI, ChgI, gl_FrontCm, frontVar, IMUHdgValDeg, gl_Leftspeednum, gl_Rightspeednum);
 
 }
 
+float GetFrontDistCm()
+{
+  float dist = (float)lidar_Front.read() / 10.0;
+  return dist;
+}
 #pragma endregion MISCELLANEOUS
+
+//10/14/26 copied from WallE3_Git.ino for 'Find Best Direction' problem
+#pragma region RUN_TO_DAYLIGHT
+void RunToDaylightV2()
+{
+  //Purpose: Look around for a wall to track or a clear direction to move.
+  //Inputs:
+  // call from ChooseBetterTrackingSide() when the first recovery effort fails
+  // FrontD, Hdg, LeftDist, LeftSteer, RightDist, RightSteer 36-element arrays
+  //Outputs:
+  //  If any orientation produces a usable steering value to a wall within tracking distance,
+  //    the robot turns to parallel that wall and the function returns with the appropriate WallTrackingCases
+  //    enumeration.  Otherwise, robot turns to the middle of the first (or only) group of headings with
+  //    a front distance > 1.5m and the function returns with WallTrackingCases TRACKING_NEITHER.  
+  //Plan:
+  // Step1: rotate 360deg in 10deg steps
+  //          at each position, fill the arrays with the corresponding values
+  // Step2: Perform a reverse sort on the master (FrontD) array (from largest to smallest front distance), and
+  //          synchronize all the other arrays to the master array
+  //          See https://www.fpaynter.com/2023/10/using-quicksort-on-multiple-associated-arrays/
+  //          for the details.
+  // Step3: Search all lines where FrontD > > MIN_RUN_TO_DAYLIGHT_DIST_CM (currently 1.5m).  For each such
+  //        line, look for the first occurrence where the left or right side distance is less than 
+  //        MAX_TRACKING_DISTANCE_CM (currently 100cm) and that same side's steering value is < MAX_STEERING_VAL / 2
+  //        (i.e. < 0.5).
+  // Step4: Turn to the heading value associated with the above line, and then return with the appropriate
+  //          WallTrackingCases enumeration
+  // Step5: If no trackable wall is found, turn to the heading value that corresponds to the central element
+  //         of the first(only) group of front distance values > MIN_RUN_TO_DAYLIGHT_DIST_CM, and return with
+  //         WallTrackingCases TRACKING_NEITHER
+  //Notes:
+  //  10/21/23 Revised to allow for the situation where BOTH left & right sides are trackable.  In this case, 
+  //    the function returns with TRACKING_NEITHER and allows HandleAnomalousConditions() to figure it out at
+  //    the top of loop().
+
+
+  //Step1: rotate 360deg in 10deg steps, filling arrays with the corresponding values
+  for (size_t i = 0; i < QUICKSORT_ARRAY_SIZE; i++)
+  {
+    //get current environmental variables
+    UpdateAllEnvironmentParameters();
+
+    Hdg[i] = IMUHdgValDeg;
+    FrontD[i] = gl_FrontCm;
+
+    //10/11/23 add in addnl 4 arrays
+    //LeftD[i] = gl_LeftCenterCm;
+    //RightD[i] = gl_RightCenterCm;
+    //LeftSteer[i] = gl_LeftSteeringVal;
+    //RightSteer[i] = gl_RightSteeringVal;
+
+    SpinTurn(false, 10);
+  }
+
+  gl_pSerPort->printf("In RunToDaylightV2()\n");
+  //gl_pSerPort->printf("RunToDaylightV2(): After init, arrays are\n");
+  //gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
+
+  //for (size_t i = 0; i < QUICKSORT_ARRAY_SIZE; i++)
+  //{
+  //  gl_pSerPort->printf("%d\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\n", FrontD[i], Hdg[i], LeftD[i], LeftSteer[i], RightD[i], RightSteer[i]);
+  //}
+
+  //Step2: call reverse quicksort on each 'slave' array with FrontD array as 'master' array
+  //QuickSortAll(false, FrontD, Hdg, LeftD, LeftSteer, RightD, RightSteer, 0, QUICKSORT_ARRAY_SIZE - 1);
+  QuickSortAll(false, FrontD, Hdg, 0, QUICKSORT_ARRAY_SIZE - 1);
+
+  gl_pSerPort->printf("RunToDaylightV2(): After REV sort, arrays are\n");
+  gl_pSerPort->printf("FrontD\tHdg\n");
+  for (size_t i = 0; i < QUICKSORT_ARRAY_SIZE; i++)
+  {
+    gl_pSerPort->printf("% 2.1f\t % 2.1f\n", FrontD[i], Hdg[i]);
+    delay(50);
+  }
+
+  ////Step3: Search all lines where FrontD > > MIN_RUN_TO_DAYLIGHT_DIST_CM (currently 1.5m).  For each such
+  ////       line, look for the first occurrence where the left or right side distance is less than 
+  ////       MAX_TRACKING_DISTANCE_CM (currently 100cm) and that same side's steering value is < MAX_STEERING_VAL / 2
+  ////       (i.e. < 0.5).
+  //uint16_t frontD_idx = 0;
+  //uint16_t frontD = FrontD[frontD_idx];
+  //bool bWallTrackAvailable = false;
+  //gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
+  //while (!bWallTrackAvailable && frontD >= MIN_RUN_TO_DAYLIGHT_DIST_CM)
+  //{
+  //  bWallTrackAvailable = ((LeftD[frontD_idx] < MAX_TRACKING_DISTANCE_CM && abs(LeftSteer[frontD_idx]) < MAX_STEERING_VAL / 2)
+  //    || (RightD[frontD_idx] < MAX_TRACKING_DISTANCE_CM && abs(RightSteer[frontD_idx]) < MAX_STEERING_VAL / 2)
+  //    );
+  //  frontD_idx++;
+  //  gl_pSerPort->printf("at index = %d, FrontD = %d, bWallTrackAvailable = %d\n", frontD_idx, FrontD[frontD_idx], bWallTrackAvailable);
+  //  //gl_pSerPort->printf("at index = %d, bWallTrackAvailable = %s\n", frontD_idx, (bWallTrackAvailable = true? "TRUE":"FALSE"));
+  //  frontD = FrontD[frontD_idx];
+  //}
+
+  //if (bWallTrackAvailable)
+  //{
+  //  uint16_t i = frontD_idx - 1; //decrement to point to correct index
+  //  gl_pSerPort->printf("Trackable Wall found at index = %d\n", i);
+
+  //  gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
+  //  gl_pSerPort->printf("%d\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\n", FrontD[i], Hdg[i], LeftD[i], LeftSteer[i], RightD[i], RightSteer[i]);
+
+  //  // Step4: Turn to the heading value associated with the above line, and then return with the appropriate
+  //  //        WallTrackingCases enumeration
+  //  gl_pSerPort->printf("Turning to heading = %2.1f\n", Hdg[i]);
+
+  //  TurnToHdgDeg(Hdg[i]);
+  //  gl_pSerPort->printf("Just after turning to %2.1f\n", Hdg[i]);
+  //  gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
+  //  gl_pSerPort->printf("%d\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\n", FrontD[i], Hdg[i], LeftD[i], LeftSteer[i], RightD[i], RightSteer[i]);
+
+  //  //10/21/23 have to check for condition where BOTH left & right sides are trackable
+  //  //if (LeftD[i] < MAX_TRACKING_DISTANCE_CM && LeftSteer[i] < MAX_STEERING_VAL / 2)
+  //  if ((LeftD[i] < MAX_TRACKING_DISTANCE_CM && LeftSteer[i] < MAX_STEERING_VAL / 2)
+  //    && (RightD[i] >= MAX_TRACKING_DISTANCE_CM || RightSteer[i] >= MAX_STEERING_VAL / 2))
+  //  {
+  //    //10/21/23 left side is ONLY tracking side
+  //    //return TRACKING_LEFT;
+  //    trkdir = TRACKING_LEFT;//added 10/21/23 for single exit strategy
+  //    gl_pSerPort->printf("In RunToDaylightV2() with trackable wall on left side: trkdir = %s\n", WallTrackStrArray[trkdir]);
+  //  }
+  //  //10/21/23 have to check for condition where BOTH left & right sides are trackable
+  //  //else if (RightD[i] < MAX_TRACKING_DISTANCE_CM && RightSteer[i] < MAX_STEERING_VAL / 2)
+  //  else if ((RightD[i] < MAX_TRACKING_DISTANCE_CM && RightSteer[i] < MAX_STEERING_VAL / 2)
+  //    && (LeftD[i] >= MAX_TRACKING_DISTANCE_CM || LeftSteer[i] >= MAX_STEERING_VAL / 2))
+  //  {
+  //    //10/21/23 right side is ONLY tracking side
+  //    //return TRACKING_RIGHT;
+  //    trkdir = TRACKING_RIGHT;//added 10/21/23 for single exit strategy
+  //    gl_pSerPort->printf("In RunToDaylightV2() with trackable wall on right side: trkdir = %s\n", WallTrackStrArray[trkdir]);
+  //  }
+  //  else //10/21/23 now this will execute if both sides are trackable
+  //  {
+  //    //gl_pSerPort->printf("Something Went Wrong! bWallTrackAvailable = true but couldn't decide which wall to track!\n");
+  //    gl_pSerPort->printf("Oops! bWallTrackAvailable = true but both walls in tracking range!\n");
+  //    gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
+  //    gl_pSerPort->printf("%d\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\n", FrontD[i], Hdg[i], LeftD[i], LeftSteer[i], RightD[i], RightSteer[i]);
+
+  //    //11/12/23 choose the closest side for tracking
+  //    if (LeftD[i] > RightD[i])
+  //    {
+
+  //      gl_pSerPort->printf("OK, right wall is closer - returning TRACKING_RIGHT\n");
+  //      trkdir = TRACKING_RIGHT;
+  //    }
+  //    else
+  //    {
+  //      gl_pSerPort->printf("OK, left wall is closer - returning TRACKING_LEFT\n");
+  //      trkdir = TRACKING_LEFT;
+  //    }
+  //    //trkdir = TRACKING_NEITHER;//added 10/21/23 for single exit strategy
+  //  }
+  //}
+  //else //added 10/21/23 for single exit strategy
+  {
+    //Step5: If no trackable wall is found, turn to the heading value that corresponds to the central element
+    //       of the first(only) group of front distance values > MIN_RUN_TO_DAYLIGHT_DIST_CM, and return with
+    //       WallTrackingCases TRACKING_NEITHER
+
+    //trkdir = TRACKING_NEITHER;//added 10/21/23 for single exit strategy
+
+    float tempHdg[36];//temp array to hold hdgs assoc with FrontD's > MIN_RUN_TO_DAYLIGHT_DIST_CM
+
+    //find out how many lines there are with FrontD > 1.5m
+    uint16_t i = 0;
+    float frontD = FrontD[i];
+    gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
+    while (frontD >= MIN_RUN_TO_DAYLIGHT_DIST_CM)
+    {
+      tempHdg[i] = (Hdg[i] < 0) ? (360 + Hdg[i]) : Hdg[i];//have to watch for 180 -- -179 transition
+      gl_pSerPort->printf("%2.1f\t%2.1f\n", FrontD[i], Hdg[i]);
+      i++;
+      frontD = FrontD[i];
+    }
+
+    gl_pSerPort->printf("There are %d lines with FrontD > MIN_RUN_TO_DAYLIGHT_DIST_CM\n", i);
+
+    gl_pSerPort->printf("the tempHdg array has the following elements\n");
+    gl_pSerPort->printf("Hdg\n");
+
+    for (int j = 0; j < i; j++)
+    {
+      gl_pSerPort->printf("%2.1f\n", tempHdg[j]);
+    }
+
+    //reverse sort the tempHdg array
+    QuickSortOneFloat(false, tempHdg, 0, 35);
+
+    gl_pSerPort->printf("after reverse sort, the tempHdg array has the following elements\n");
+    gl_pSerPort->printf("Hdg\n");
+
+    for (int j = 0; j < i; j++)
+    {
+      gl_pSerPort->printf("%2.1f\n", tempHdg[j]);
+    }
+
+
+    float runtoHdg = 0;
+    if (i > 2)//at least three lines
+    {
+      //I want to select the middle HEADING (not distance) in the group
+      runtoHdg = tempHdg[i / 2];
+    }
+    else
+    {
+      runtoHdg = tempHdg[0];
+    }
+
+    gl_pSerPort->printf("Turning to heading %2.1f\n", runtoHdg);
+    TurnToHdgDeg(runtoHdg);
+    UpdateAllDistances();
+    delay(50);
+    gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
+    gl_pSerPort->printf("%2.1f\t%2.1f\n", gl_FrontCm, IMUHdgValDeg);
+    digitalWrite(RED_LASER_DIODE_PIN, HIGH);
+  }
+
+  //return TRACKING_NEITHER;
+  //gl_pSerPort->printf("RunToDaylightV2() returning %s\n", WallTrackStrArray[trkdir]);
+  //return trkdir;//rev 10/21/23 to implement single exit strategy
+}
+
+//10/08/23 added to support RunToDaylightV2()
+//10/11/23 chg frontd to master, chg hgd to slave
+//void QuickSort(bool bFwdSort, uint16_t* frontd, float* hdg, int start, int end)
+//void QuickSort(bool bFwdSort, uint16_t* master, float* slave, int start, int end)
+//{
+//  // base case
+//  if (start >= end)
+//    return;
+//
+//  // partitioning the master array
+//  int p = partition(bFwdSort, master, slave, start, end);
+//
+//  // Sorting the left part
+//  QuickSort(bFwdSort, master, slave, start, p - 1);
+//
+//  // Sorting the right part
+//  QuickSort(bFwdSort, master, slave, p + 1, end);
+//}
+
+//added 10/14/26. For now it just calls GetFrontDistCm().  Can add rear distance later
+void UpdateAllDistances()
+{
+  gl_FrontCm = GetFrontDistCm();
+}
+
+float UpdateFrontDistanceArray(float newdistval)
+{
+  //Purpose: Update front distance distance array
+  //Provenance: 03/05/22
+  //Inputs: 
+  //  newdistance = latest distance value from LIDAR
+  //Outputs:
+  //  all array values shifted down one, and newdistance added to top
+  //  return 'oldestdistance' the value shifted off the bottom. This is needed for variance calcs
+  //Notes:
+  //  03/05/22 this fcn was previously part of 'CalcFrontDistArrayVariance()'
+  //  10/14/26 ported from WallE3_Git.ino
+
+  //DEBUG!!
+  //gl_pSerPort->printf("%lu: UpdateFrontDistanceArray(%d) before array update\n", millis(), newdistval);
+  //for (int i = 0; i < FRONT_DIST_ARRAY_SIZE - 1; i++)
+  //{
+  // gl_pSerPort->printf("aFrontDistCM[%d] = %d\n", i, aFrontDistCM[i]) ;
+  // delay(10);
+  //}
+  //DEBUG!!
+
+  float oldestDistVal = aFrontDistCM[0];
+  //gl_pSerPort->printf("oldest value = %2.1f\n", oldestDistVal);
+  for (int i = 0; i < FRONT_DIST_ARRAY_SIZE - 1; i++)
+  {
+    aFrontDistCM[i] = aFrontDistCM[i + 1];
+  }
+  aFrontDistCM[FRONT_DIST_ARRAY_SIZE - 1] = newdistval;
+
+  //DEBUG!!
+  //gl_pSerPort->printf("%lu: UpdateFrontDistanceArray(%2.1f) after array update\n",millis(), newdistval);
+  //for (int i = 0; i < FRONT_DIST_ARRAY_SIZE; i++)
+  //{
+  // gl_pSerPort->printf("aFrontDistCM[%d] = %2.1f\n", i, aFrontDistCM[i]) ;
+  // delay(10);
+  //}
+
+  //gl_pSerPort->printf("oldest value = %2.1f\n", oldestDistVal);
+  //DEBUG!!
+
+  return oldestDistVal;
+}
+
+void InitFrontDistArray()
+{
+  //04/01/15 initialize 'stuck detection' arrays
+  //06/17/20 re-wrote for better readability
+    //to ensure var > STUCK_FRONT_VARIANCE_THRESHOLD for first FRONT_DIST_ARRAY_SIZE loops
+    //array is initialized with sawtooth from 0 to MAX_FRONT_DISTANCE_CM
+  //10/14/26 copied from WallE3_Git.ino & rev for float vs int
+
+  //06/12/22 removed gl_Frontmean
+  //gl_pSerPort->printf("InitFrontDistArray() top: prev_mean = %2.1f, prev_var = %2.1f\n",
+  //  gl_Frontmean, gl_Frontvar);
+  //gl_pSerPort->printf("InitFrontDistArray() top: prev_var = %2.1f\n", gl_Frontvar);
+
+  float newval = 0;
+  int bumpval = MAX_FRONT_DISTANCE_CM / FRONT_DIST_ARRAY_SIZE;
+  bool bgoingUp = true;
+
+  for (int i = 0; i < FRONT_DIST_ARRAY_SIZE; i++)
+  {
+    aFrontDistCM[i] = newval;
+    //DEBUG!!
+    //gl_pSerPort->printf("i = %d, newval = %d, aFrontdist[%d] = %d\n", i, newval, i, aFrontDistCM[i]);
+    //DEBUG!!
+    if (bgoingUp)
+    {
+
+      if (newval < MAX_FRONT_DISTANCE_CM - bumpval) //don't want newval > MAX_FRONT_DISTANCE_CM
+      {
+        newval += bumpval;
+      }
+      else
+      {
+        bgoingUp = false;
+      }
+    }
+    else
+    {
+      if (newval > bumpval) //don't want newval < 0
+      {
+        newval -= bumpval;
+      }
+      else
+      {
+        bgoingUp = true;
+      }
+    }
+  }
+
+  //04/19/19 init gl_Frontmean  & gl_Frontvar to mean/var respectively
+  //06/12/22 repl gl_Frontmean with local var
+  float sum = 0;
+  for (int i = 0; i < FRONT_DIST_ARRAY_SIZE; i++)
+  {
+    sum += aFrontDistCM[i]; //adds in rest of values
+  }
+  //gl_Frontmean = (float)sum / (float)FRONT_DIST_ARRAY_SIZE;
+  float mean = (float)sum / (float)FRONT_DIST_ARRAY_SIZE;
+
+  //	Step2: calc new 'brute force' variance
+  float sumsquares = 0;
+  for (int i = 0; i < FRONT_DIST_ARRAY_SIZE; i++)
+  {
+    //sumsquares += (aFrontDistCM[i] - gl_Frontmean) * (aFrontDistCM[i] - gl_Frontmean);
+    sumsquares += (aFrontDistCM[i] - mean) * (aFrontDistCM[i] - mean);
+  }
+
+  gl_Frontvar = sumsquares / FRONT_DIST_ARRAY_SIZE;
+
+  //DEBUG!!
+  //gl_pSerPort->printf("Initial Front Distance Array Contents\n");
+  //gl_pSerPort->printf("Idx\tRdist\n");
+  //for (size_t i = 0; i < FRONT_DIST_ARRAY_SIZE; i++)
+  //{
+  // gl_pSerPort->printf("%d\t%d\n", i, aFrontDistCM[i]);
+  //}
+  //DEBUG!!
+}
+
+float  CalcBruteFrontDistArrayVariance()
+{
+  //Purpose:  Calculate Variance of front distance array
+  //Inputs: aFrontDistCM = FRONT_DIST_ARRAY_SIZE array of uint16_ts representing front distances
+  //Outputs: Variance of selected array
+  //Plan:
+  //	Step1: Calculate mean for array
+  //  Step2: calc new 'brute force' variance
+  //Notes:
+  //  05/02/22 copied from PPalace article to re-instate 'brute force' method
+
+//Step1: Calculate mean for array
+  long sum = 0;
+  for (int i = 0; i < FRONT_DIST_ARRAY_SIZE; i++)
+  {
+    sum += aFrontDistCM[i]; //adds in rest of values
+  }
+  float brute_mean = (float)sum / (float)FRONT_DIST_ARRAY_SIZE;
+
+  //Step2: calc new 'brute force' variance
+  float sumsquares = 0;
+  for (int i = 0; i < FRONT_DIST_ARRAY_SIZE; i++)
+  {
+    sumsquares += (aFrontDistCM[i] - brute_mean) * (aFrontDistCM[i] - brute_mean);
+  }
+
+  float brute_var = sumsquares / FRONT_DIST_ARRAY_SIZE;
+
+  //DEBUG!!
+  if (brute_var < STUCK_FRONT_VARIANCE_THRESHOLD)
+  {
+    //gl_pSerPort->printf("%lu: in CalcBruteFrontDistArrayVariance \n", millis());
+    //for (int i = 0; i < FRONT_DIST_ARRAY_SIZE; i++)
+    //{
+    // gl_pSerPort->printf("aFrontDistCM[%d] = %d\n", i, aFrontDistCM[i]); //adds in rest of values
+    //}
+  //DEBUG!!
+
+  }
+
+  return brute_var;
+}
+
+
+
+//10/08/23 added to support RunToDaylightV2()
+void QuickSortOneFloat(bool bFwdSort, float* arr, int start, int end)
+{
+  // base case
+  if (start >= end)
+    return;
+
+  // partitioning the arr array
+  int p = partitionOneFloat(bFwdSort, arr, start, end);
+
+  // Sorting the left part
+  QuickSortOneFloat(bFwdSort, arr, start, p - 1);
+
+  // Sorting the right part
+  partitionOneFloat(bFwdSort, arr, p + 1, end);
+}
+
+// 10/11/23 added bool bFwdSort to sig
+int partitionOneFloat(bool bFwdSort, float* arr, int start, int end)
+{
+  int pivot = arr[start];
+
+  int count = 0;
+
+  //10/11/23 rev to perform both fwd & rev sorts
+  if (bFwdSort)
+  {
+    for (int i = start + 1; i <= end; i++)
+    {
+      if (arr[i] <= pivot)
+      {
+        count++;
+      }
+    }
+  }
+  else //rev sort
+  {
+    for (int i = start + 1; i <= end; i++)
+    {
+      if (arr[i] > pivot)//reverse sort
+      {
+        count++;
+      }
+    }
+  }
+
+  // Giving pivot element its correct position
+  int pivotIndex = start + count;
+  mySwap(arr[pivotIndex], arr[start]);
+
+  // Sorting left and right parts of the pivot element
+  int i = start, j = end;
+
+  while (i < pivotIndex && j > pivotIndex)
+  {
+    if (bFwdSort)
+    {
+      while (arr[i] <= pivot)
+      {
+        i++;
+      }
+
+      while (arr[j] > pivot)
+      {
+        j--;
+      }
+    }
+    else //reverse sort
+    {
+      while (arr[i] > pivot)
+      {
+        i++;
+      }
+
+      while (arr[j] <= pivot)
+      {
+        j--;
+      }
+
+    }
+    if (i < pivotIndex && j > pivotIndex)
+    {
+      mySwap(arr[i++], arr[j--]);
+    }
+  }
+
+  return pivotIndex;
+}
+
+void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
+{
+  // base case
+  if (start >= end)
+    return;
+
+  // partitioning the master array
+  //int p = partitionAll(bFwdSort, frontd, hdg, leftd, rightd, leftsteer, rightsteer, start, end);
+  int p = partitionAll(bFwdSort, frontd, hdg, start, end);
+
+  // Sorting the left part
+  QuickSortAll(bFwdSort, frontd, hdg, start, p - 1);
+
+  // Sorting the right part
+  QuickSortAll(bFwdSort, frontd, hdg, p + 1, end);
+}
+
+int partitionAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
+{
+  int pivot = frontd[start];
+
+  int count = 0;
+
+  //10/11/23 rev to perform both fwd & rev sorts
+  if (bFwdSort)
+  {
+    for (int i = start + 1; i <= end; i++)
+    {
+      if (frontd[i] <= pivot)
+      {
+        count++;
+      }
+    }
+  }
+  else //rev sort
+  {
+    for (int i = start + 1; i <= end; i++)
+    {
+      if (frontd[i] > pivot)//reverse sort
+      {
+        count++;
+      }
+    }
+  }
+
+
+  // Giving pivot element its correct position
+  int pivotIndex = start + count;
+  mySwap(frontd[pivotIndex], frontd[start]);
+  mySwap(hdg[pivotIndex], hdg[start]);
+
+  // Sorting left and right parts of the pivot element
+  int i = start, j = end;
+
+  while (i < pivotIndex && j > pivotIndex)
+  {
+    if (bFwdSort)
+    {
+      while (frontd[i] <= pivot)
+      {
+        i++;
+      }
+
+      while (frontd[j] > pivot)
+      {
+        j--;
+      }
+    }
+    else //reverse sort
+    {
+      while (frontd[i] > pivot)
+      {
+        i++;
+      }
+
+      while (frontd[j] <= pivot)
+      {
+        j--;
+      }
+
+    }
+    if (i < pivotIndex && j > pivotIndex)
+    {
+
+      //10/06/23 can't use '++' or '--' here because then remaining mySwap calls have wrong indices
+      //mySwap(master[i++], master[j--]);
+      //mySwap(slave[i++], slave[j--]);
+
+      //mySwap(master[i], master[j]);
+      //mySwap(slave[i], slave[j]);
+
+      mySwap(frontd[i], frontd[j]);
+      mySwap(hdg[i], hdg[j]);
+
+      i++; j--;
+    }
+  }
+
+  return pivotIndex;
+}
+
+template <class T>
+void mySwap(T& rightval, T& leftval)
+{
+  T tempright = rightval;
+  rightval = leftval;
+  leftval = tempright;
+}
+
+#pragma endregion  RUN_TO_DAYLIGHT
