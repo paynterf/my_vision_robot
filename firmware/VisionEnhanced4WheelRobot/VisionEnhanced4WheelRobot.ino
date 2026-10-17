@@ -66,7 +66,8 @@ const int MSEC_PER_DIST_UPDATE = 50; //10/02/22 rev to speed up rate indep of fr
 const uint16_t WALL_TRACK_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE;//10/02/22 rev to make these two intervals the same
 //const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = 250; //10/02/22 added to separate out slow front LIDAR from faster VL53L1X sensors
 const uint16_t FRONT_DISTANCE_UPDATE_INTERVAL_MSEC = MSEC_PER_DIST_UPDATE; //03/15/23 Garmin LIDAR can easily keep up with other sensors
-const uint16_t TURN_RATE_UPDATE_INTERVAL_MSEC = 30; //30 mSec is as fast as it can go
+//const uint16_t TURN_RATE_UPDATE_INTERVAL_MSEC = 30; //30 mSec is as fast as it can go
+const uint16_t TURN_RATE_UPDATE_INTERVAL_MSEC = 60; //30 mSec is as fast as it can go
 const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 1000; //added 09/25/23
 //const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 500; //09/21/26
 //const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 2000; //10/03/26
@@ -388,6 +389,7 @@ float gl_AvgHeadingDeg;
 const uint16_t QUICKSORT_ARRAY_SIZE = 36;
 float FrontD[QUICKSORT_ARRAY_SIZE];
 float Hdg[QUICKSORT_ARRAY_SIZE];
+ulong Msec[QUICKSORT_ARRAY_SIZE];
 const uint16_t MIN_RUN_TO_DAYLIGHT_DIST_CM = 150;//added 10/14/23
 
 unsigned long prevTime = 0;
@@ -645,10 +647,8 @@ void setup()
 
 #endif // NO_VL53L1X
   gl_pSerPort->printf(F("Initializing Front Distance Array..."));
-  //InitRearDistArray();
   InitFrontDistArray();
   gl_pSerPort->println(F("Done"));
-
 
 #pragma endregion FRONT_LIDAR
 
@@ -733,6 +733,9 @@ void setup()
 //#ifndef NO_TELEMETRY
 //  gl_pSerPort->println(LoopTelemHdrStr);
 //#endif
+
+  RunToDaylightV2();
+  while (1);
 }
 
 void loop()
@@ -3024,9 +3027,9 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
 
   numDeg = abs(numDeg);//  03/22/22 added to ensure numDeg >= 0
   //DEBUG!!
-  gl_pSerPort->printf("In SpinTurn(%s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
-    b_ccw == TURNDIR_CCW ? "CCW" : "CW", numDeg, degPersec,
-    TurnRate_Kp, TurnRate_Ki, TurnRate_Kd);
+  //gl_pSerPort->printf("In SpinTurn(%s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
+  //  b_ccw == TURNDIR_CCW ? "CCW" : "CW", numDeg, degPersec,
+  //  TurnRate_Kp, TurnRate_Ki, TurnRate_Kd);
   //DEBUG!!
 
   //no need to continue if the IMU isn't available
@@ -3115,11 +3118,11 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
   {
     //11/06/20 now just loops between PID calcs
     CheckForUserInput();
-    gl_pSerPort->printf("RearCm = %3.2f\n", GetFrontDistCm());
+    //gl_pSerPort->printf("RearCm = %3.2f\n", GetFrontDistCm());
 
     if (MsecSinceLastTurnRateUpdate >= TURN_RATE_UPDATE_INTERVAL_MSEC)
     {
-      MsecSinceLastTurnRateUpdate -= TURN_RATE_UPDATE_INTERVAL_MSEC;
+      MsecSinceLastTurnRateUpdate = 0;
 
       UpdateIMUHdgValDeg(); //update IMUHdgValDeg
 
@@ -3141,8 +3144,8 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
       float rate = abs(1000 * dHdg / TURN_RATE_UPDATE_INTERVAL_MSEC);
       if (abs(rate) > 4 * degPersec)
       {
-        Serial.printf("Skipping bad hdg %2.2f.  dHdg = %2.2f, rate = %2.2f, degPerSec = %2.2f\n", 
-          IMUHdgValDeg, dHdg, rate, degPersec);
+        Serial.printf("%lu: Skipping bad hdg %2.2f.  dHdg = %2.2f, rate = %2.2f, degPerSec = %2.2f\n", 
+          millis(), IMUHdgValDeg, dHdg, rate, degPersec);
         Prev_HdgDeg = IMUHdgValDeg; //re-synch prev to curr hdg for next time
 
         continue; //skip this heading reading
@@ -3225,7 +3228,7 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
 
       if (bDoneTurning)
       {
-        gl_pSerPort->printf("Completed turn with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
+        //gl_pSerPort->printf("Completed turn with hdg = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
 
         bResult = true;
         break;
@@ -3238,8 +3241,9 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
   //gl_pSerPort->printf("average turn rate = %2.1f\n", avgrate);
 
   StopBothMotors();
-  //delay(1000); //added 04/27/21 for debug
-  gl_pSerPort->printf("Exiting SpinTurn() with bResult = %d\n", bResult);
+  //gl_pSerPort->printf("RearCm = %3.2f\n", GetFrontDistCm());
+
+  //gl_pSerPort->printf("Exiting SpinTurn() with bResult = %d\n", bResult);
   return bResult;
 }
 
@@ -4256,9 +4260,8 @@ float GetFrontDistCm()
 #pragma region RUN_TO_DAYLIGHT
 void RunToDaylightV2()
 {
-  //Purpose: Look around for a wall to track or a clear direction to move.
+  //Purpose: Look around for a clear direction to move.
   //Inputs:
-  // call from ChooseBetterTrackingSide() when the first recovery effort fails
   // FrontD, Hdg, LeftDist, LeftSteer, RightDist, RightSteer 36-element arrays
   //Outputs:
   //  If any orientation produces a usable steering value to a wall within tracking distance,
@@ -4276,16 +4279,10 @@ void RunToDaylightV2()
   //        line, look for the first occurrence where the left or right side distance is less than 
   //        MAX_TRACKING_DISTANCE_CM (currently 100cm) and that same side's steering value is < MAX_STEERING_VAL / 2
   //        (i.e. < 0.5).
-  // Step4: Turn to the heading value associated with the above line, and then return with the appropriate
-  //          WallTrackingCases enumeration
-  // Step5: If no trackable wall is found, turn to the heading value that corresponds to the central element
+  // Step5: turn to the heading value that corresponds to the central element
   //         of the first(only) group of front distance values > MIN_RUN_TO_DAYLIGHT_DIST_CM, and return with
   //         WallTrackingCases TRACKING_NEITHER
   //Notes:
-  //  10/21/23 Revised to allow for the situation where BOTH left & right sides are trackable.  In this case, 
-  //    the function returns with TRACKING_NEITHER and allows HandleAnomalousConditions() to figure it out at
-  //    the top of loop().
-
 
   //Step1: rotate 360deg in 10deg steps, filling arrays with the corresponding values
   for (size_t i = 0; i < QUICKSORT_ARRAY_SIZE; i++)
@@ -4295,178 +4292,89 @@ void RunToDaylightV2()
 
     Hdg[i] = IMUHdgValDeg;
     FrontD[i] = gl_FrontCm;
-
-    //10/11/23 add in addnl 4 arrays
-    //LeftD[i] = gl_LeftCenterCm;
-    //RightD[i] = gl_RightCenterCm;
-    //LeftSteer[i] = gl_LeftSteeringVal;
-    //RightSteer[i] = gl_RightSteeringVal;
+    Msec[i] = millis();
 
     SpinTurn(false, 10);
+    //SpinTurn(true, 10);
   }
 
   gl_pSerPort->printf("In RunToDaylightV2()\n");
-  //gl_pSerPort->printf("RunToDaylightV2(): After init, arrays are\n");
-  //gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
 
-  //for (size_t i = 0; i < QUICKSORT_ARRAY_SIZE; i++)
-  //{
-  //  gl_pSerPort->printf("%d\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\n", FrontD[i], Hdg[i], LeftD[i], LeftSteer[i], RightD[i], RightSteer[i]);
-  //}
+  gl_pSerPort->printf("RunToDaylightV2(): Before REV sort, arrays are\n");
+  gl_pSerPort->printf("MSec\tFrontD\tHdg\n");
+  for (size_t i = 0; i < QUICKSORT_ARRAY_SIZE; i++)
+  {
+    gl_pSerPort->printf("%lu\t%2.1f\t % 2.1f\n", Msec[i], FrontD[i], Hdg[i]);
+    delay(50);
+  }
+  gl_pSerPort->println();
 
   //Step2: call reverse quicksort on each 'slave' array with FrontD array as 'master' array
   //QuickSortAll(false, FrontD, Hdg, LeftD, LeftSteer, RightD, RightSteer, 0, QUICKSORT_ARRAY_SIZE - 1);
-  QuickSortAll(false, FrontD, Hdg, 0, QUICKSORT_ARRAY_SIZE - 1);
+  //QuickSortAll(false, FrontD, Hdg, 0, QUICKSORT_ARRAY_SIZE - 1);
+  QuickSortAll(false, FrontD, Hdg, Msec, 0, QUICKSORT_ARRAY_SIZE - 1);
 
   gl_pSerPort->printf("RunToDaylightV2(): After REV sort, arrays are\n");
   gl_pSerPort->printf("FrontD\tHdg\n");
   for (size_t i = 0; i < QUICKSORT_ARRAY_SIZE; i++)
   {
-    gl_pSerPort->printf("% 2.1f\t % 2.1f\n", FrontD[i], Hdg[i]);
+    gl_pSerPort->printf("%lu\t%2.1f\t % 2.1f\n", Msec[i], FrontD[i], Hdg[i]);
     delay(50);
   }
-
-  ////Step3: Search all lines where FrontD > > MIN_RUN_TO_DAYLIGHT_DIST_CM (currently 1.5m).  For each such
-  ////       line, look for the first occurrence where the left or right side distance is less than 
-  ////       MAX_TRACKING_DISTANCE_CM (currently 100cm) and that same side's steering value is < MAX_STEERING_VAL / 2
-  ////       (i.e. < 0.5).
-  //uint16_t frontD_idx = 0;
-  //uint16_t frontD = FrontD[frontD_idx];
-  //bool bWallTrackAvailable = false;
-  //gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
-  //while (!bWallTrackAvailable && frontD >= MIN_RUN_TO_DAYLIGHT_DIST_CM)
-  //{
-  //  bWallTrackAvailable = ((LeftD[frontD_idx] < MAX_TRACKING_DISTANCE_CM && abs(LeftSteer[frontD_idx]) < MAX_STEERING_VAL / 2)
-  //    || (RightD[frontD_idx] < MAX_TRACKING_DISTANCE_CM && abs(RightSteer[frontD_idx]) < MAX_STEERING_VAL / 2)
-  //    );
-  //  frontD_idx++;
-  //  gl_pSerPort->printf("at index = %d, FrontD = %d, bWallTrackAvailable = %d\n", frontD_idx, FrontD[frontD_idx], bWallTrackAvailable);
-  //  //gl_pSerPort->printf("at index = %d, bWallTrackAvailable = %s\n", frontD_idx, (bWallTrackAvailable = true? "TRUE":"FALSE"));
-  //  frontD = FrontD[frontD_idx];
-  //}
-
-  //if (bWallTrackAvailable)
-  //{
-  //  uint16_t i = frontD_idx - 1; //decrement to point to correct index
-  //  gl_pSerPort->printf("Trackable Wall found at index = %d\n", i);
-
-  //  gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
-  //  gl_pSerPort->printf("%d\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\n", FrontD[i], Hdg[i], LeftD[i], LeftSteer[i], RightD[i], RightSteer[i]);
-
-  //  // Step4: Turn to the heading value associated with the above line, and then return with the appropriate
-  //  //        WallTrackingCases enumeration
-  //  gl_pSerPort->printf("Turning to heading = %2.1f\n", Hdg[i]);
-
-  //  TurnToHdgDeg(Hdg[i]);
-  //  gl_pSerPort->printf("Just after turning to %2.1f\n", Hdg[i]);
-  //  gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
-  //  gl_pSerPort->printf("%d\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\n", FrontD[i], Hdg[i], LeftD[i], LeftSteer[i], RightD[i], RightSteer[i]);
-
-  //  //10/21/23 have to check for condition where BOTH left & right sides are trackable
-  //  //if (LeftD[i] < MAX_TRACKING_DISTANCE_CM && LeftSteer[i] < MAX_STEERING_VAL / 2)
-  //  if ((LeftD[i] < MAX_TRACKING_DISTANCE_CM && LeftSteer[i] < MAX_STEERING_VAL / 2)
-  //    && (RightD[i] >= MAX_TRACKING_DISTANCE_CM || RightSteer[i] >= MAX_STEERING_VAL / 2))
-  //  {
-  //    //10/21/23 left side is ONLY tracking side
-  //    //return TRACKING_LEFT;
-  //    trkdir = TRACKING_LEFT;//added 10/21/23 for single exit strategy
-  //    gl_pSerPort->printf("In RunToDaylightV2() with trackable wall on left side: trkdir = %s\n", WallTrackStrArray[trkdir]);
-  //  }
-  //  //10/21/23 have to check for condition where BOTH left & right sides are trackable
-  //  //else if (RightD[i] < MAX_TRACKING_DISTANCE_CM && RightSteer[i] < MAX_STEERING_VAL / 2)
-  //  else if ((RightD[i] < MAX_TRACKING_DISTANCE_CM && RightSteer[i] < MAX_STEERING_VAL / 2)
-  //    && (LeftD[i] >= MAX_TRACKING_DISTANCE_CM || LeftSteer[i] >= MAX_STEERING_VAL / 2))
-  //  {
-  //    //10/21/23 right side is ONLY tracking side
-  //    //return TRACKING_RIGHT;
-  //    trkdir = TRACKING_RIGHT;//added 10/21/23 for single exit strategy
-  //    gl_pSerPort->printf("In RunToDaylightV2() with trackable wall on right side: trkdir = %s\n", WallTrackStrArray[trkdir]);
-  //  }
-  //  else //10/21/23 now this will execute if both sides are trackable
-  //  {
-  //    //gl_pSerPort->printf("Something Went Wrong! bWallTrackAvailable = true but couldn't decide which wall to track!\n");
-  //    gl_pSerPort->printf("Oops! bWallTrackAvailable = true but both walls in tracking range!\n");
-  //    gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
-  //    gl_pSerPort->printf("%d\t%2.1f\t%2.1f\t%2.1f\t%2.1f\t%2.1f\n", FrontD[i], Hdg[i], LeftD[i], LeftSteer[i], RightD[i], RightSteer[i]);
-
-  //    //11/12/23 choose the closest side for tracking
-  //    if (LeftD[i] > RightD[i])
-  //    {
-
-  //      gl_pSerPort->printf("OK, right wall is closer - returning TRACKING_RIGHT\n");
-  //      trkdir = TRACKING_RIGHT;
-  //    }
-  //    else
-  //    {
-  //      gl_pSerPort->printf("OK, left wall is closer - returning TRACKING_LEFT\n");
-  //      trkdir = TRACKING_LEFT;
-  //    }
-  //    //trkdir = TRACKING_NEITHER;//added 10/21/23 for single exit strategy
-  //  }
-  //}
-  //else //added 10/21/23 for single exit strategy
-  {
-    //Step5: If no trackable wall is found, turn to the heading value that corresponds to the central element
-    //       of the first(only) group of front distance values > MIN_RUN_TO_DAYLIGHT_DIST_CM, and return with
-    //       WallTrackingCases TRACKING_NEITHER
-
-    //trkdir = TRACKING_NEITHER;//added 10/21/23 for single exit strategy
-
-    float tempHdg[36];//temp array to hold hdgs assoc with FrontD's > MIN_RUN_TO_DAYLIGHT_DIST_CM
 
     //find out how many lines there are with FrontD > 1.5m
     uint16_t i = 0;
     float frontD = FrontD[i];
-    gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
+    gl_pSerPort->printf("Msec\tFrontD\tHdg\n");
     while (frontD >= MIN_RUN_TO_DAYLIGHT_DIST_CM)
     {
-      tempHdg[i] = (Hdg[i] < 0) ? (360 + Hdg[i]) : Hdg[i];//have to watch for 180 -- -179 transition
-      gl_pSerPort->printf("%2.1f\t%2.1f\n", FrontD[i], Hdg[i]);
+      //tempHdg[i] = (Hdg[i] < 0) ? (360 + Hdg[i]) : Hdg[i];//have to watch for 180 -- -179 transition
+      gl_pSerPort->printf("%lu\t%2.1f\t%2.1f\n", Msec[i], FrontD[i], Hdg[i]);
       i++;
       frontD = FrontD[i];
     }
 
     gl_pSerPort->printf("There are %d lines with FrontD > MIN_RUN_TO_DAYLIGHT_DIST_CM\n", i);
 
-    gl_pSerPort->printf("the tempHdg array has the following elements\n");
-    gl_pSerPort->printf("Hdg\n");
+    //gl_pSerPort->printf("the Good Distance array has the following elements\n");
+    //gl_pSerPort->printf("Hdg\n");
 
-    for (int j = 0; j < i; j++)
-    {
-      gl_pSerPort->printf("%2.1f\n", tempHdg[j]);
-    }
+    //for (int j = 0; j < i; j++)
+    //{
+    //  gl_pSerPort->printf("%2.1f\n", tempHdg[j]);
+    //}
 
-    //reverse sort the tempHdg array
-    QuickSortOneFloat(false, tempHdg, 0, 35);
+    ////reverse sort the tempHdg array
+    //QuickSortOneFloat(false, tempHdg, 0, 35);
 
-    gl_pSerPort->printf("after reverse sort, the tempHdg array has the following elements\n");
-    gl_pSerPort->printf("Hdg\n");
+    //gl_pSerPort->printf("after reverse sort, the tempHdg array has the following elements\n");
+    //gl_pSerPort->printf("Hdg\n");
 
-    for (int j = 0; j < i; j++)
-    {
-      gl_pSerPort->printf("%2.1f\n", tempHdg[j]);
-    }
+    //for (int j = 0; j < i; j++)
+    //{
+    //  gl_pSerPort->printf("%2.1f\n", tempHdg[j]);
+    //}
 
 
-    float runtoHdg = 0;
-    if (i > 2)//at least three lines
-    {
-      //I want to select the middle HEADING (not distance) in the group
-      runtoHdg = tempHdg[i / 2];
-    }
-    else
-    {
-      runtoHdg = tempHdg[0];
-    }
+    //float runtoHdg = 0;
+    //if (i > 2)//at least three lines
+    //{
+    //  //I want to select the middle HEADING (not distance) in the group
+    //  runtoHdg = tempHdg[i / 2];
+    //}
+    //else
+    //{
+    //  runtoHdg = tempHdg[0];
+    //}
 
-    gl_pSerPort->printf("Turning to heading %2.1f\n", runtoHdg);
-    TurnToHdgDeg(runtoHdg);
-    UpdateAllDistances();
-    delay(50);
-    gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
-    gl_pSerPort->printf("%2.1f\t%2.1f\n", gl_FrontCm, IMUHdgValDeg);
-    digitalWrite(RED_LASER_DIODE_PIN, HIGH);
-  }
+    //gl_pSerPort->printf("Turning to heading %2.1f\n", runtoHdg);
+    //TurnToHdgDeg(runtoHdg);
+    //UpdateAllDistances();
+    //delay(50);
+    //gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
+    //gl_pSerPort->printf("%2.1f\t%2.1f\n", gl_FrontCm, IMUHdgValDeg);
+    //digitalWrite(RED_LASER_DIODE_PIN, HIGH);
+  //}
 
   //return TRACKING_NEITHER;
   //gl_pSerPort->printf("RunToDaylightV2() returning %s\n", WallTrackStrArray[trkdir]);
@@ -4754,7 +4662,8 @@ int partitionOneFloat(bool bFwdSort, float* arr, int start, int end)
   return pivotIndex;
 }
 
-void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
+//void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
+void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, ulong* Msec, int start, int end)
 {
   // base case
   if (start >= end)
@@ -4762,18 +4671,27 @@ void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
 
   // partitioning the master array
   //int p = partitionAll(bFwdSort, frontd, hdg, leftd, rightd, leftsteer, rightsteer, start, end);
-  int p = partitionAll(bFwdSort, frontd, hdg, start, end);
+  int p = partitionAll(bFwdSort, frontd, hdg, Msec, start, end);
 
   // Sorting the left part
-  QuickSortAll(bFwdSort, frontd, hdg, start, p - 1);
+  //QuickSortAll(bFwdSort, frontd, hdg, start, p - 1);
+  QuickSortAll(bFwdSort, frontd, hdg, Msec, start, p - 1);
 
   // Sorting the right part
-  QuickSortAll(bFwdSort, frontd, hdg, p + 1, end);
+  //QuickSortAll(bFwdSort, frontd, hdg, p + 1, end);
+  QuickSortAll(bFwdSort, frontd, hdg, Msec, p + 1, end);
 }
 
-int partitionAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
+//int partitionAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
+//int partitionAll(bool bFwdSort, float* master, float* slave, int start, int end)
+int partitionAll(bool bFwdSort, float* master, float* slave1, ulong* slave2, int start, int end)
 {
-  int pivot = frontd[start];
+  //Notes:
+  //  10/17 changed all 'frontd's to 'master' and 'hdg' to 'slave1' to more accurately reflect algorithm
+  //int pivot = frontd[start];
+  //gl_pSerPort->printf("in partitionAll pivot = %d, frontd[%d] = %2.1f\n", pivot, start, frontd[start]);
+  float pivot = master[start];
+  //gl_pSerPort->printf("in partitionAll pivot = %2.1f, master[%d] = %2.1f\n", pivot, start, master[start]);
 
   int count = 0;
 
@@ -4782,7 +4700,8 @@ int partitionAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
   {
     for (int i = start + 1; i <= end; i++)
     {
-      if (frontd[i] <= pivot)
+      //if (frontd[i] <= pivot)
+      if (master[i] <= pivot)
       {
         count++;
       }
@@ -4792,7 +4711,8 @@ int partitionAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
   {
     for (int i = start + 1; i <= end; i++)
     {
-      if (frontd[i] > pivot)//reverse sort
+      //if (frontd[i] > pivot)//reverse sort
+      if (master[i] > pivot)//reverse sort
       {
         count++;
       }
@@ -4802,8 +4722,10 @@ int partitionAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
 
   // Giving pivot element its correct position
   int pivotIndex = start + count;
-  mySwap(frontd[pivotIndex], frontd[start]);
-  mySwap(hdg[pivotIndex], hdg[start]);
+  //mySwap(frontd[pivotIndex], frontd[start]);
+  mySwap(master[pivotIndex], master[start]);
+  mySwap(slave1[pivotIndex], slave1[start]);
+  mySwap(slave2[pivotIndex], slave2[start]);
 
   // Sorting left and right parts of the pivot element
   int i = start, j = end;
@@ -4812,25 +4734,28 @@ int partitionAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
   {
     if (bFwdSort)
     {
-      while (frontd[i] <= pivot)
+      //while (frontd[i] <= pivot)
+      while (master[i] <= pivot)
       {
         i++;
       }
 
-      while (frontd[j] > pivot)
+      //while (frontd[j] > pivot)
+      while (master[j] > pivot)
       {
         j--;
       }
     }
     else //reverse sort
     {
-      while (frontd[i] > pivot)
+      //while (frontd[i] > pivot)
+      while (master[i] > pivot)
       {
         i++;
       }
 
-      while (frontd[j] <= pivot)
-      {
+      //while (frontd[j] <= pivot)
+      while (master[j] <= pivot)      {
         j--;
       }
 
@@ -4840,13 +4765,15 @@ int partitionAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
 
       //10/06/23 can't use '++' or '--' here because then remaining mySwap calls have wrong indices
       //mySwap(master[i++], master[j--]);
-      //mySwap(slave[i++], slave[j--]);
+      //mySwap(slave1[i++], slave1[j--]);
 
       //mySwap(master[i], master[j]);
-      //mySwap(slave[i], slave[j]);
+      //mySwap(slave1[i], slave1[j]);
 
-      mySwap(frontd[i], frontd[j]);
-      mySwap(hdg[i], hdg[j]);
+      //mySwap(frontd[i], frontd[j]);
+      mySwap(master[i], master[j]);
+      mySwap(slave1[i], slave1[j]);
+      mySwap(slave2[i], slave2[j]);
 
       i++; j--;
     }
