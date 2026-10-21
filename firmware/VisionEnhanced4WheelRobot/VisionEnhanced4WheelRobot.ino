@@ -386,10 +386,11 @@ float gl_PID_Outval;
 float gl_AvgHeadingDeg;
 
 //added 10/08/23 for QuickSort()
-const uint16_t QUICKSORT_ARRAY_SIZE = 36;
-float FrontD[QUICKSORT_ARRAY_SIZE];
-float Hdg[QUICKSORT_ARRAY_SIZE];
-ulong Msec[QUICKSORT_ARRAY_SIZE];
+//const uint16_t RUN_TO_DAYLIGHT_ARRAY_SIZE = 36;
+const uint16_t RUN_TO_DAYLIGHT_ARRAY_SIZE = 72;
+float FrontD[RUN_TO_DAYLIGHT_ARRAY_SIZE];
+float Hdg[RUN_TO_DAYLIGHT_ARRAY_SIZE];
+ulong Msec[RUN_TO_DAYLIGHT_ARRAY_SIZE];
 const uint16_t MIN_RUN_TO_DAYLIGHT_DIST_CM = 150;//added 10/14/23
 
 unsigned long prevTime = 0;
@@ -4262,30 +4263,22 @@ void RunToDaylightV2()
 {
   //Purpose: Look around for a clear direction to move.
   //Inputs:
-  // FrontD, Hdg, LeftDist, LeftSteer, RightDist, RightSteer 36-element arrays
+  // FrontD, Hdg, LeftDist, LeftSteer, RightDist, RightSteer RUN_TO_DAYLIGHT_ARRAY_SIZE (36 or 72)-element arrays
   //Outputs:
   //  If any orientation produces a usable steering value to a wall within tracking distance,
   //    the robot turns to parallel that wall and the function returns with the appropriate WallTrackingCases
   //    enumeration.  Otherwise, robot turns to the middle of the first (or only) group of headings with
   //    a front distance > 1.5m and the function returns with WallTrackingCases TRACKING_NEITHER.  
   //Plan:
-  // Step1: rotate 360deg in 10deg steps
+  // Step1: rotate 360deg in 360/RUN_TO_DAYLIGHT_ARRAY_SIZE deg steps
   //          at each position, fill the arrays with the corresponding values
-  // Step2: Perform a reverse sort on the master (FrontD) array (from largest to smallest front distance), and
-  //          synchronize all the other arrays to the master array
-  //          See https://www.fpaynter.com/2023/10/using-quicksort-on-multiple-associated-arrays/
-  //          for the details.
-  // Step3: Search all lines where FrontD > > MIN_RUN_TO_DAYLIGHT_DIST_CM (currently 1.5m).  For each such
-  //        line, look for the first occurrence where the left or right side distance is less than 
-  //        MAX_TRACKING_DISTANCE_CM (currently 100cm) and that same side's steering value is < MAX_STEERING_VAL / 2
-  //        (i.e. < 0.5).
   // Step5: turn to the heading value that corresponds to the central element
   //         of the first(only) group of front distance values > MIN_RUN_TO_DAYLIGHT_DIST_CM, and return with
   //         WallTrackingCases TRACKING_NEITHER
   //Notes:
 
   //Step1: rotate 360deg in 10deg steps, filling arrays with the corresponding values
-  for (size_t i = 0; i < QUICKSORT_ARRAY_SIZE; i++)
+  for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
   {
     //get current environmental variables
     UpdateAllEnvironmentParameters();
@@ -4294,33 +4287,21 @@ void RunToDaylightV2()
     FrontD[i] = gl_FrontCm;
     Msec[i] = millis();
 
-    SpinTurn(false, 10);
-    //SpinTurn(true, 10);
+    SpinTurn(true, 360/ RUN_TO_DAYLIGHT_ARRAY_SIZE);
   }
 
-  gl_pSerPort->printf("In RunToDaylightV2()\n");
+//DEBUG!!
+  //gl_pSerPort->printf("In RunToDaylightV2()\n");
+//DEBUG!!
 
-  gl_pSerPort->printf("RunToDaylightV2(): Before REV sort, arrays are\n");
+  gl_pSerPort->printf("RunToDaylightV2(): arrays are\n");
   gl_pSerPort->printf("MSec\tFrontD\tHdg\n");
-  for (size_t i = 0; i < QUICKSORT_ARRAY_SIZE; i++)
+  for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
   {
     gl_pSerPort->printf("%lu\t%2.1f\t % 2.1f\n", Msec[i], FrontD[i], Hdg[i]);
     delay(50);
   }
   gl_pSerPort->println();
-
-  //Step2: call reverse quicksort on each 'slave' array with FrontD array as 'master' array
-  //QuickSortAll(false, FrontD, Hdg, LeftD, LeftSteer, RightD, RightSteer, 0, QUICKSORT_ARRAY_SIZE - 1);
-  //QuickSortAll(false, FrontD, Hdg, 0, QUICKSORT_ARRAY_SIZE - 1);
-  QuickSortAll(false, FrontD, Hdg, Msec, 0, QUICKSORT_ARRAY_SIZE - 1);
-
-  gl_pSerPort->printf("RunToDaylightV2(): After REV sort, arrays are\n");
-  gl_pSerPort->printf("FrontD\tHdg\n");
-  for (size_t i = 0; i < QUICKSORT_ARRAY_SIZE; i++)
-  {
-    gl_pSerPort->printf("%lu\t%2.1f\t % 2.1f\n", Msec[i], FrontD[i], Hdg[i]);
-    delay(50);
-  }
 
     //find out how many lines there are with FrontD > 1.5m
     uint16_t i = 0;
@@ -4336,69 +4317,7 @@ void RunToDaylightV2()
 
     gl_pSerPort->printf("There are %d lines with FrontD > MIN_RUN_TO_DAYLIGHT_DIST_CM\n", i);
 
-    //gl_pSerPort->printf("the Good Distance array has the following elements\n");
-    //gl_pSerPort->printf("Hdg\n");
-
-    //for (int j = 0; j < i; j++)
-    //{
-    //  gl_pSerPort->printf("%2.1f\n", tempHdg[j]);
-    //}
-
-    ////reverse sort the tempHdg array
-    //QuickSortOneFloat(false, tempHdg, 0, 35);
-
-    //gl_pSerPort->printf("after reverse sort, the tempHdg array has the following elements\n");
-    //gl_pSerPort->printf("Hdg\n");
-
-    //for (int j = 0; j < i; j++)
-    //{
-    //  gl_pSerPort->printf("%2.1f\n", tempHdg[j]);
-    //}
-
-
-    //float runtoHdg = 0;
-    //if (i > 2)//at least three lines
-    //{
-    //  //I want to select the middle HEADING (not distance) in the group
-    //  runtoHdg = tempHdg[i / 2];
-    //}
-    //else
-    //{
-    //  runtoHdg = tempHdg[0];
-    //}
-
-    //gl_pSerPort->printf("Turning to heading %2.1f\n", runtoHdg);
-    //TurnToHdgDeg(runtoHdg);
-    //UpdateAllDistances();
-    //delay(50);
-    //gl_pSerPort->printf("FrontD\tHdg\tLeftD\tLSteer\tRightD\tRSteer\n");
-    //gl_pSerPort->printf("%2.1f\t%2.1f\n", gl_FrontCm, IMUHdgValDeg);
-    //digitalWrite(RED_LASER_DIODE_PIN, HIGH);
-  //}
-
-  //return TRACKING_NEITHER;
-  //gl_pSerPort->printf("RunToDaylightV2() returning %s\n", WallTrackStrArray[trkdir]);
-  //return trkdir;//rev 10/21/23 to implement single exit strategy
 }
-
-//10/08/23 added to support RunToDaylightV2()
-//10/11/23 chg frontd to master, chg hgd to slave
-//void QuickSort(bool bFwdSort, uint16_t* frontd, float* hdg, int start, int end)
-//void QuickSort(bool bFwdSort, uint16_t* master, float* slave, int start, int end)
-//{
-//  // base case
-//  if (start >= end)
-//    return;
-//
-//  // partitioning the master array
-//  int p = partition(bFwdSort, master, slave, start, end);
-//
-//  // Sorting the left part
-//  QuickSort(bFwdSort, master, slave, start, p - 1);
-//
-//  // Sorting the right part
-//  QuickSort(bFwdSort, master, slave, p + 1, end);
-//}
 
 //added 10/14/26. For now it just calls GetFrontDistCm().  Can add rear distance later
 void UpdateAllDistances()
@@ -4573,221 +4492,212 @@ float  CalcBruteFrontDistArrayVariance()
 
 
 
-//10/08/23 added to support RunToDaylightV2()
-void QuickSortOneFloat(bool bFwdSort, float* arr, int start, int end)
-{
-  // base case
-  if (start >= end)
-    return;
-
-  // partitioning the arr array
-  int p = partitionOneFloat(bFwdSort, arr, start, end);
-
-  // Sorting the left part
-  QuickSortOneFloat(bFwdSort, arr, start, p - 1);
-
-  // Sorting the right part
-  partitionOneFloat(bFwdSort, arr, p + 1, end);
-}
-
-// 10/11/23 added bool bFwdSort to sig
-int partitionOneFloat(bool bFwdSort, float* arr, int start, int end)
-{
-  int pivot = arr[start];
-
-  int count = 0;
-
-  //10/11/23 rev to perform both fwd & rev sorts
-  if (bFwdSort)
-  {
-    for (int i = start + 1; i <= end; i++)
-    {
-      if (arr[i] <= pivot)
-      {
-        count++;
-      }
-    }
-  }
-  else //rev sort
-  {
-    for (int i = start + 1; i <= end; i++)
-    {
-      if (arr[i] > pivot)//reverse sort
-      {
-        count++;
-      }
-    }
-  }
-
-  // Giving pivot element its correct position
-  int pivotIndex = start + count;
-  mySwap(arr[pivotIndex], arr[start]);
-
-  // Sorting left and right parts of the pivot element
-  int i = start, j = end;
-
-  while (i < pivotIndex && j > pivotIndex)
-  {
-    if (bFwdSort)
-    {
-      while (arr[i] <= pivot)
-      {
-        i++;
-      }
-
-      while (arr[j] > pivot)
-      {
-        j--;
-      }
-    }
-    else //reverse sort
-    {
-      while (arr[i] > pivot)
-      {
-        i++;
-      }
-
-      while (arr[j] <= pivot)
-      {
-        j--;
-      }
-
-    }
-    if (i < pivotIndex && j > pivotIndex)
-    {
-      mySwap(arr[i++], arr[j--]);
-    }
-  }
-
-  return pivotIndex;
-}
-
-//void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
-void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, ulong* Msec, int start, int end)
-{
-  // base case
-  if (start >= end)
-    return;
-
-  // partitioning the master array
-  //int p = partitionAll(bFwdSort, frontd, hdg, leftd, rightd, leftsteer, rightsteer, start, end);
-  int p = partitionAll(bFwdSort, frontd, hdg, Msec, start, end);
-
-  // Sorting the left part
-  //QuickSortAll(bFwdSort, frontd, hdg, start, p - 1);
-  QuickSortAll(bFwdSort, frontd, hdg, Msec, start, p - 1);
-
-  // Sorting the right part
-  //QuickSortAll(bFwdSort, frontd, hdg, p + 1, end);
-  QuickSortAll(bFwdSort, frontd, hdg, Msec, p + 1, end);
-}
-
-//int partitionAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
-//int partitionAll(bool bFwdSort, float* master, float* slave, int start, int end)
-int partitionAll(bool bFwdSort, float* master, float* slave1, ulong* slave2, int start, int end)
-{
-  //Notes:
-  //  10/17 changed all 'frontd's to 'master' and 'hdg' to 'slave1' to more accurately reflect algorithm
-  //int pivot = frontd[start];
-  //gl_pSerPort->printf("in partitionAll pivot = %d, frontd[%d] = %2.1f\n", pivot, start, frontd[start]);
-  float pivot = master[start];
-  //gl_pSerPort->printf("in partitionAll pivot = %2.1f, master[%d] = %2.1f\n", pivot, start, master[start]);
-
-  int count = 0;
-
-  //10/11/23 rev to perform both fwd & rev sorts
-  if (bFwdSort)
-  {
-    for (int i = start + 1; i <= end; i++)
-    {
-      //if (frontd[i] <= pivot)
-      if (master[i] <= pivot)
-      {
-        count++;
-      }
-    }
-  }
-  else //rev sort
-  {
-    for (int i = start + 1; i <= end; i++)
-    {
-      //if (frontd[i] > pivot)//reverse sort
-      if (master[i] > pivot)//reverse sort
-      {
-        count++;
-      }
-    }
-  }
-
-
-  // Giving pivot element its correct position
-  int pivotIndex = start + count;
-  //mySwap(frontd[pivotIndex], frontd[start]);
-  mySwap(master[pivotIndex], master[start]);
-  mySwap(slave1[pivotIndex], slave1[start]);
-  mySwap(slave2[pivotIndex], slave2[start]);
-
-  // Sorting left and right parts of the pivot element
-  int i = start, j = end;
-
-  while (i < pivotIndex && j > pivotIndex)
-  {
-    if (bFwdSort)
-    {
-      //while (frontd[i] <= pivot)
-      while (master[i] <= pivot)
-      {
-        i++;
-      }
-
-      //while (frontd[j] > pivot)
-      while (master[j] > pivot)
-      {
-        j--;
-      }
-    }
-    else //reverse sort
-    {
-      //while (frontd[i] > pivot)
-      while (master[i] > pivot)
-      {
-        i++;
-      }
-
-      //while (frontd[j] <= pivot)
-      while (master[j] <= pivot)      {
-        j--;
-      }
-
-    }
-    if (i < pivotIndex && j > pivotIndex)
-    {
-
-      //10/06/23 can't use '++' or '--' here because then remaining mySwap calls have wrong indices
-      //mySwap(master[i++], master[j--]);
-      //mySwap(slave1[i++], slave1[j--]);
-
-      //mySwap(master[i], master[j]);
-      //mySwap(slave1[i], slave1[j]);
-
-      //mySwap(frontd[i], frontd[j]);
-      mySwap(master[i], master[j]);
-      mySwap(slave1[i], slave1[j]);
-      mySwap(slave2[i], slave2[j]);
-
-      i++; j--;
-    }
-  }
-
-  return pivotIndex;
-}
-
-template <class T>
-void mySwap(T& rightval, T& leftval)
-{
-  T tempright = rightval;
-  rightval = leftval;
-  leftval = tempright;
-}
-
+////10/08/23 added to support RunToDaylightV2()
+//void QuickSortOneFloat(bool bFwdSort, float* arr, int start, int end)
+//{
+//  // base case
+//  if (start >= end)
+//    return;
+//
+//  // partitioning the arr array
+//  int p = partitionOneFloat(bFwdSort, arr, start, end);
+//
+//  // Sorting the left part
+//  QuickSortOneFloat(bFwdSort, arr, start, p - 1);
+//
+//  // Sorting the right part
+//  partitionOneFloat(bFwdSort, arr, p + 1, end);
+//}
+//
+//// 10/11/23 added bool bFwdSort to sig
+//int partitionOneFloat(bool bFwdSort, float* arr, int start, int end)
+//{
+//  int pivot = arr[start];
+//
+//  int count = 0;
+//
+//  //10/11/23 rev to perform both fwd & rev sorts
+//  if (bFwdSort)
+//  {
+//    for (int i = start + 1; i <= end; i++)
+//    {
+//      if (arr[i] <= pivot)
+//      {
+//        count++;
+//      }
+//    }
+//  }
+//  else //rev sort
+//  {
+//    for (int i = start + 1; i <= end; i++)
+//    {
+//      if (arr[i] > pivot)//reverse sort
+//      {
+//        count++;
+//      }
+//    }
+//  }
+//
+//  // Giving pivot element its correct position
+//  int pivotIndex = start + count;
+//  mySwap(arr[pivotIndex], arr[start]);
+//
+//  // Sorting left and right parts of the pivot element
+//  int i = start, j = end;
+//
+//  while (i < pivotIndex && j > pivotIndex)
+//  {
+//    if (bFwdSort)
+//    {
+//      while (arr[i] <= pivot)
+//      {
+//        i++;
+//      }
+//
+//      while (arr[j] > pivot)
+//      {
+//        j--;
+//      }
+//    }
+//    else //reverse sort
+//    {
+//      while (arr[i] > pivot)
+//      {
+//        i++;
+//      }
+//
+//      while (arr[j] <= pivot)
+//      {
+//        j--;
+//      }
+//
+//    }
+//    if (i < pivotIndex && j > pivotIndex)
+//    {
+//      mySwap(arr[i++], arr[j--]);
+//    }
+//  }
+//
+//  return pivotIndex;
+//}
+//
+////void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
+//void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, ulong* Msec, int start, int end)
+//{
+//  // base case
+//  if (start >= end)
+//    return;
+//
+//  // partitioning the master array
+//  //int p = partitionAll(bFwdSort, frontd, hdg, leftd, rightd, leftsteer, rightsteer, start, end);
+//  int p = partitionAll(bFwdSort, frontd, hdg, Msec, start, end);
+//
+//  // Sorting the left part
+//  //QuickSortAll(bFwdSort, frontd, hdg, start, p - 1);
+//  QuickSortAll(bFwdSort, frontd, hdg, Msec, start, p - 1);
+//
+//  // Sorting the right part
+//  //QuickSortAll(bFwdSort, frontd, hdg, p + 1, end);
+//  QuickSortAll(bFwdSort, frontd, hdg, Msec, p + 1, end);
+//}
+//
+//int partitionAll(bool bFwdSort, float* master, float* slave1, ulong* slave2, int start, int end)
+//{
+//  //Notes:
+//  //  10/17 changed all 'frontd's to 'master' and 'hdg/Msec' to 'slave1/slave2' to more accurately reflect algorithm
+//  //  10/17 changed 'pivot' from int to float
+//
+//  float pivot = master[start];
+//  //gl_pSerPort->printf("in partitionAll pivot = %2.1f, master[%d] = %2.1f, slave2[%d] = %2.1f, slave2[%d] = %2.1f\n", 
+//  // pivot, start, master[start],slave2[start], slave2[start]);
+//
+//  int count = 0;
+//
+//  //10/11/23 rev to perform both fwd & rev sorts
+//  if (bFwdSort)
+//  {
+//    for (int i = start + 1; i <= end; i++)
+//    {
+//      if (master[i] <= pivot)
+//      {
+//        count++;
+//      }
+//    }
+//  }
+//  else //rev sort
+//  {
+//    for (int i = start + 1; i <= end; i++)
+//    {
+//      if (master[i] > pivot)//reverse sort
+//      {
+//        count++;
+//      }
+//    }
+//  }
+//
+//
+//  // Giving pivot element its correct position
+//  int pivotIndex = start + count;
+//  mySwap(master[pivotIndex], master[start]);
+//  mySwap(slave1[pivotIndex], slave1[start]);
+//  mySwap(slave2[pivotIndex], slave2[start]);
+//
+//  // Sorting left and right parts of the pivot element
+//  int i = start, j = end;
+//
+//  while (i < pivotIndex && j > pivotIndex)
+//  {
+//    if (bFwdSort)
+//    {
+//      while (master[i] <= pivot)
+//      {
+//        i++;
+//      }
+//
+//      while (master[j] > pivot)
+//      {
+//        j--;
+//      }
+//    }
+//    else //reverse sort
+//    {
+//      while (master[i] > pivot)
+//      {
+//        i++;
+//      }
+//
+//      while (master[j] <= pivot)      {
+//        j--;
+//      }
+//
+//    }
+//    if (i < pivotIndex && j > pivotIndex)
+//    {
+//
+//      //10/06/23 can't use '++' or '--' here because then remaining mySwap calls have wrong indices
+//      //mySwap(master[i++], master[j--]);
+//      //mySwap(slave1[i++], slave1[j--]);
+//
+//      //mySwap(master[i], master[j]);
+//      //mySwap(slave1[i], slave1[j]);
+//
+//      mySwap(master[i], master[j]);
+//      mySwap(slave1[i], slave1[j]);
+//      mySwap(slave2[i], slave2[j]);
+//
+//      i++; j--;
+//    }
+//  }
+//
+//  return pivotIndex;
+//}
+//
+//template <class T>
+//void mySwap(T& rightval, T& leftval)
+//{
+//  T tempright = rightval;
+//  rightval = leftval;
+//  leftval = tempright;
+//}
+//
 #pragma endregion  RUN_TO_DAYLIGHT
