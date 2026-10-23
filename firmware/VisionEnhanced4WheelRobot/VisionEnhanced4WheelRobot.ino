@@ -349,6 +349,41 @@ bool RollingTurn(bool b_ccw, bool b_fwd, float numDeg, float Kp, float Ki, float
 
 #pragma endregion HEADING_AND_RATE_BASED_TURN_PARAMETERS
 
+#pragma region ENUMS
+enum SystemStatus
+{
+  STATUS_MANUAL_CONTROL = 0,
+  STATUS_AUTO_NAV
+};
+
+SystemStatus gl_SystemStatus = SystemStatus::STATUS_AUTO_NAV;
+
+enum AnomalyCode
+{
+  ANOMALY_NONE = 0,
+  ANOMALY_STUCK_AHEAD,
+  ANOMALY_STUCK_BEHIND,
+  ANOMALY_OBSTACLE_AHEAD,
+  ANOMALY_WALL_OFFSET_DIST_AHEAD,
+  ANOMALY_OBSTACLE_BEHIND,
+  ANOMALY_DEAD_BATTERY,
+  ANOMALY_CHARGER_CONNECTED, //added 05/22/22
+  ANOMALY_EXCESS_STEER_VAL, //added 05/19/23
+  ANOMALY_IR_BEAM_AVAILABLE, //added 08/20/23
+  ANOMALY_MIRRORED_SFC //added 01/21/24
+};
+
+//08/23/23 unused names removed
+const char* AnomalyStrArray[] = { "NONE", "STUCK_AHEAD", "STUCK_BEHIND", "OBSTACLE_AHEAD",
+                                  "WALL_OFFSET_DIST_AHEAD","OBSTACLE_BEHIND",
+                                  "DEAD_BATTERY", "CHARGER_CONNECTED",
+                                  "EXCESS_STEER_VAL", "IR_BEAM_AVAILABLE", "MIRRORED_SURFACE"
+};//02/08/23 added "OPEN_DOORWAY" 03/13/23 added "TRACKING_WRONG_WALL", 01/22/24 added "MIRRORED_SURFACE"
+
+uint8_t gl_AnomalyCode = ANOMALY_NONE;
+
+#pragma endregion ENUMS
+
 #pragma region GLOBAL_VARIABLES
 float gl_batteryVoltage;
 uint16_t gl_Leftspeednum = MOTOR_SPEED_OFF;
@@ -731,12 +766,12 @@ void setup()
 
   mSecSinceLastTelemetryHeader = 0;
   mSecSinceLastTelemetryUpdate = 0;
-//#ifndef NO_TELEMETRY
-//  gl_pSerPort->println(LoopTelemHdrStr);
-//#endif
+#ifndef NO_TELEMETRY
+  gl_pSerPort->println(LoopTelemHdrStr);
+#endif
 
-  RunToDaylightV2();
-  while (1);
+  //RunToDaylightV2();
+  //while (1);
 }
 
 void loop()
@@ -2518,7 +2553,7 @@ void UpdateChgStatusLEDs(float battv, bool bStillCharging) //04/22/20 added bSti
 bool CheckForUserInput()
 {
   //Notes:
-  //  11/21/21 rev to accomodate cmd input from either serial, and output to both
+  //  11/21/21 rev to accommodate cmd input from either serial, and output to both
   //  12/25/21 another try at using pointer for Serial object
   //  09/19/22 Serial object is now global - no need to figure it out here
   //  09/25/22 remove if (incomingByte != 0), extend if (gl_pSerPort->available() > 0) to entire function
@@ -2532,7 +2567,8 @@ bool CheckForUserInput()
   //gl_pSerPort->printf("%lu: In CheckForUserInput() with gl_pSerPort->available() = %s\n",
   //  (uint32_t)gl_ElapsedRunMillisec, gl_pSerPort->available() > 0?"TRUE":"FALSE");
 
-  const int bufflen = 10; //09/24/26 rev to make sure all chars are consumed
+  //const int bufflen = 10; //09/24/26 rev to make sure all chars are consumed
+  const int bufflen = 20; //10/22/26 rev to handle full-string commands, i.e. 'STUCK_SCAN'
   char buff[bufflen];
   memset(buff, 0, bufflen);
   //*byte incomingByte = 0; //moved here 11/21/21
@@ -2552,6 +2588,9 @@ bool CheckForUserInput()
     {
       buff[i] = toupper(buff[i]);
     }
+
+    //10/22/26 remove any trailing whitespace
+    trim_trailing(buff);
 
 
     // say what you got: rev 09/25/26 to show entire string
@@ -2596,6 +2635,8 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   //  11/04/23 '*' now causes fcn to return FALSE
   //  08/09/26 bumped bufflen to accommodate new 'Lnn.nn' and 'Rnn.nn' SpinTurn() commands
   //  09/24/26 now only one switch for all incoming chars.
+  //  10/22/26 All input is now uppercase - no need for lowercase entries
+  //  10/22/26 rev to accommodate full-string commands
 
   //const int bufflen = 10;
   ////char buff[bufflen];
@@ -2612,13 +2653,15 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
 
   gl_pSerPort->printf("top of switch: buff[0] = %c\n", buff[0]);
   //switch (in_char)
+  //switch (buff[0])
   switch (buff[0])
   {
     //---------------------------------------------------------------------
     // Firmware Update
     //---------------------------------------------------------------------
-  case 0x55: // 'U'
-  case 0x75: // 'u'
+  //case 0x55: // 'U'
+  //case 0x75: // 'u'
+  case 'U':
 #pragma region FIRMWARE_UPDATE_MAIN
     StopBothMotors();
     gl_pSerPort->printf(F("Start Program Update - Send new HEX file!\n"));
@@ -2653,10 +2696,12 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     //---------------------------------------------------------------------
     // Interactive Command Mode
     //---------------------------------------------------------------------
-  case 0x43: // 'C'
-  case 0x63: // 'c'
+  //case 0x43: // 'C'
+  case 'C':
+  //case 0x63: // 'c'
   {//needed to avoid "crosses initialization of int speed" compiler error
-    gl_pSerPort->printf("Stopping Motors\n\n");
+    gl_SystemStatus = SystemStatus::STATUS_MANUAL_CONTROL; //10/23/26 interrupts any ongoing sequences like scans
+    gl_pSerPort->printf("System Status changed to 'MANUAL_CONTROL: Stopping Motors\n\n");
     StopBothMotors(); //09/14/26 moved above menu printout
     //int speed = 0;
 
@@ -2684,6 +2729,8 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     // Flush any leftover characters on both ports
     while (Serial.available())  Serial.read();
     while (Serial1.available()) Serial1.read();
+
+    retval = false; //10/22/26 added to terminate RunToDaylight scan
   }
   break;
 
@@ -2755,7 +2802,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
 
   //Turn to Heading case
   case 'T':
-  case 't':
+  //case 't':
   {
     gl_pSerPort->printf(F("ACK T\n"));
 
@@ -2983,6 +3030,22 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     StopBothMotors();
     break;
 
+    //10/22/26 '!' case added to accommodate arbitrary strings (i.e. 'STUCK_SCAN')
+  case '!':
+  {
+    int bufflen = strlen(buff);
+    gl_pSerPort->printf(F("%lu: 'In '!' case with buff = %s with length %d\n"), millis(), buff, bufflen);
+    //if (strncmp(buff, "!STUCK_SCAN", strlen("!STUCK_SCAN") == 0))
+    if (strncmp(buff, "!STUCK_SCAN", bufflen) == 0)
+    {
+      gl_pSerPort->printf(F("%lu: 'stuck scan' request received\n"), millis());
+      StopBothMotors();
+      gl_AnomalyCode = ANOMALY_STUCK_AHEAD;
+      RunToDaylightV2();
+      //gl_AnomalyCode = ANOMALY_NONE; //10/22/26 I don't think this is needed.
+    }
+    break;
+  }
   default:
     // Unknown top-level character – stop motors
     gl_pSerPort->printf(F("Unknown top-level character: '%c' - Stopping Motors\n"), buff[0]);
@@ -2991,6 +3054,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   } // end outer switch
 
 
+  //gl_pSerPort->printf(F("At exit from CheckForUserInput(), retval = %s\n"), retval? "TRUE": "FALSE");
   return retval;
 }
 #pragma endregion OTA & DIRECT MOTOR CONTROL
@@ -4220,7 +4284,6 @@ void UpdateAllEnvironmentParameters()
   //gl_pSerPort->printf("%lu: Bottom of UpdateAllEnvironmentParameters(%s) with anomaly code = %s\n", millis(), WallTrackStrArray[trkdir], AnomalyStrArray[gl_LastAnomalyCode]);
 }
 
-
 void SendTelemetry()
 {
 #ifdef NO_TELEMETRY
@@ -4255,6 +4318,13 @@ float GetFrontDistCm()
   float dist = (float)lidar_Front.read() / 10.0;
   return dist;
 }
+
+void trim_trailing(char* s)
+{
+  int len = strlen(s);
+  while (len > 0 && isspace((unsigned char)s[len - 1]))
+    s[--len] = '\0';
+}
 #pragma endregion MISCELLANEOUS
 
 //10/14/26 copied from WallE3_Git.ino for 'Find Best Direction' problem
@@ -4276,10 +4346,18 @@ void RunToDaylightV2()
   //         of the first(only) group of front distance values > MIN_RUN_TO_DAYLIGHT_DIST_CM, and return with
   //         WallTrackingCases TRACKING_NEITHER
   //Notes:
+  //  10/22/26 added line to check for user input between steps
 
   //Step1: rotate 360deg in 10deg steps, filling arrays with the corresponding values
   for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
   {
+    //10/23/26 added to abort scan on user 'C' input
+    if (gl_SystemStatus == SystemStatus::STATUS_MANUAL_CONTROL)
+    {
+      gl_pSerPort->printf("%lu: RunToDaylightV2(): gl_SystemStatus == SystemStatus::STATUS_MANUAL_CONTROL -> Scan Aborted\n", millis());
+      return;
+    }
+
     //get current environmental variables
     UpdateAllEnvironmentParameters();
 
@@ -4492,212 +4570,4 @@ float  CalcBruteFrontDistArrayVariance()
 
 
 
-////10/08/23 added to support RunToDaylightV2()
-//void QuickSortOneFloat(bool bFwdSort, float* arr, int start, int end)
-//{
-//  // base case
-//  if (start >= end)
-//    return;
-//
-//  // partitioning the arr array
-//  int p = partitionOneFloat(bFwdSort, arr, start, end);
-//
-//  // Sorting the left part
-//  QuickSortOneFloat(bFwdSort, arr, start, p - 1);
-//
-//  // Sorting the right part
-//  partitionOneFloat(bFwdSort, arr, p + 1, end);
-//}
-//
-//// 10/11/23 added bool bFwdSort to sig
-//int partitionOneFloat(bool bFwdSort, float* arr, int start, int end)
-//{
-//  int pivot = arr[start];
-//
-//  int count = 0;
-//
-//  //10/11/23 rev to perform both fwd & rev sorts
-//  if (bFwdSort)
-//  {
-//    for (int i = start + 1; i <= end; i++)
-//    {
-//      if (arr[i] <= pivot)
-//      {
-//        count++;
-//      }
-//    }
-//  }
-//  else //rev sort
-//  {
-//    for (int i = start + 1; i <= end; i++)
-//    {
-//      if (arr[i] > pivot)//reverse sort
-//      {
-//        count++;
-//      }
-//    }
-//  }
-//
-//  // Giving pivot element its correct position
-//  int pivotIndex = start + count;
-//  mySwap(arr[pivotIndex], arr[start]);
-//
-//  // Sorting left and right parts of the pivot element
-//  int i = start, j = end;
-//
-//  while (i < pivotIndex && j > pivotIndex)
-//  {
-//    if (bFwdSort)
-//    {
-//      while (arr[i] <= pivot)
-//      {
-//        i++;
-//      }
-//
-//      while (arr[j] > pivot)
-//      {
-//        j--;
-//      }
-//    }
-//    else //reverse sort
-//    {
-//      while (arr[i] > pivot)
-//      {
-//        i++;
-//      }
-//
-//      while (arr[j] <= pivot)
-//      {
-//        j--;
-//      }
-//
-//    }
-//    if (i < pivotIndex && j > pivotIndex)
-//    {
-//      mySwap(arr[i++], arr[j--]);
-//    }
-//  }
-//
-//  return pivotIndex;
-//}
-//
-////void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, int start, int end)
-//void QuickSortAll(bool bFwdSort, float* frontd, float* hdg, ulong* Msec, int start, int end)
-//{
-//  // base case
-//  if (start >= end)
-//    return;
-//
-//  // partitioning the master array
-//  //int p = partitionAll(bFwdSort, frontd, hdg, leftd, rightd, leftsteer, rightsteer, start, end);
-//  int p = partitionAll(bFwdSort, frontd, hdg, Msec, start, end);
-//
-//  // Sorting the left part
-//  //QuickSortAll(bFwdSort, frontd, hdg, start, p - 1);
-//  QuickSortAll(bFwdSort, frontd, hdg, Msec, start, p - 1);
-//
-//  // Sorting the right part
-//  //QuickSortAll(bFwdSort, frontd, hdg, p + 1, end);
-//  QuickSortAll(bFwdSort, frontd, hdg, Msec, p + 1, end);
-//}
-//
-//int partitionAll(bool bFwdSort, float* master, float* slave1, ulong* slave2, int start, int end)
-//{
-//  //Notes:
-//  //  10/17 changed all 'frontd's to 'master' and 'hdg/Msec' to 'slave1/slave2' to more accurately reflect algorithm
-//  //  10/17 changed 'pivot' from int to float
-//
-//  float pivot = master[start];
-//  //gl_pSerPort->printf("in partitionAll pivot = %2.1f, master[%d] = %2.1f, slave2[%d] = %2.1f, slave2[%d] = %2.1f\n", 
-//  // pivot, start, master[start],slave2[start], slave2[start]);
-//
-//  int count = 0;
-//
-//  //10/11/23 rev to perform both fwd & rev sorts
-//  if (bFwdSort)
-//  {
-//    for (int i = start + 1; i <= end; i++)
-//    {
-//      if (master[i] <= pivot)
-//      {
-//        count++;
-//      }
-//    }
-//  }
-//  else //rev sort
-//  {
-//    for (int i = start + 1; i <= end; i++)
-//    {
-//      if (master[i] > pivot)//reverse sort
-//      {
-//        count++;
-//      }
-//    }
-//  }
-//
-//
-//  // Giving pivot element its correct position
-//  int pivotIndex = start + count;
-//  mySwap(master[pivotIndex], master[start]);
-//  mySwap(slave1[pivotIndex], slave1[start]);
-//  mySwap(slave2[pivotIndex], slave2[start]);
-//
-//  // Sorting left and right parts of the pivot element
-//  int i = start, j = end;
-//
-//  while (i < pivotIndex && j > pivotIndex)
-//  {
-//    if (bFwdSort)
-//    {
-//      while (master[i] <= pivot)
-//      {
-//        i++;
-//      }
-//
-//      while (master[j] > pivot)
-//      {
-//        j--;
-//      }
-//    }
-//    else //reverse sort
-//    {
-//      while (master[i] > pivot)
-//      {
-//        i++;
-//      }
-//
-//      while (master[j] <= pivot)      {
-//        j--;
-//      }
-//
-//    }
-//    if (i < pivotIndex && j > pivotIndex)
-//    {
-//
-//      //10/06/23 can't use '++' or '--' here because then remaining mySwap calls have wrong indices
-//      //mySwap(master[i++], master[j--]);
-//      //mySwap(slave1[i++], slave1[j--]);
-//
-//      //mySwap(master[i], master[j]);
-//      //mySwap(slave1[i], slave1[j]);
-//
-//      mySwap(master[i], master[j]);
-//      mySwap(slave1[i], slave1[j]);
-//      mySwap(slave2[i], slave2[j]);
-//
-//      i++; j--;
-//    }
-//  }
-//
-//  return pivotIndex;
-//}
-//
-//template <class T>
-//void mySwap(T& rightval, T& leftval)
-//{
-//  T tempright = rightval;
-//  rightval = leftval;
-//  leftval = tempright;
-//}
-//
 #pragma endregion  RUN_TO_DAYLIGHT
