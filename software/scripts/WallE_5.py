@@ -26,10 +26,15 @@ import select
 import rclpy
 from rclpy.node import Node
 from my_vision_robot_msgs.msg import ClearestDirection
-import queue
+import queue, threading
 
 teensy_events = queue.Queue()
 heading_events = queue.Queue()
+
+#added 10/24/26 for '!STUCK_AHEAD' implementation
+stuck_ahead_event = threading.Event() #set in telemetry_loop() when '!STUCK_AHEAD' is detected in telemetry
+scan_queue = queue.Queue()          # holds the finished list of rows
+scan_ready = threading.Event()
 
 #09/29/26 Added to store latest IMU heading from telemetry
 imu_lock = threading.Lock()
@@ -109,6 +114,10 @@ last_repeat_cmd = None   # added to allow repeated 4/6 commands to accumulate he
 latest_clearest_rx = 0.0
 clearest_count = 0
 
+#10/24/26 part of '!STUCK_AHEAD' implementation
+global bestWidth, bestStart, bestEnd, numruns, runStart
+
+
 # ----------------------------------------------------------------------
 # Utility
 # ----------------------------------------------------------------------
@@ -175,6 +184,10 @@ def send_turn(direction: str, degrees: float, rate: float = None):
 # ----------------------------------------------------------------------
 def telemetry_loop():
     """Read lines from the Teensy and write them cleanly to the telemetry log."""
+    
+    scan_rows = []
+    collecting = False
+
     global telemetry_running, ser, latest_imu_hdg
 
     TELEMETRY_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -191,9 +204,18 @@ def telemetry_loop():
                         #pass any nav_seq control lines to the telemetry queue for wait_for_done()
 
                         body = strip_teensy_ts(line) #added to avoid teensy timestamp in front of DONE/ACK/BUSY lines
+                        if body.startswith(("M ")):
+                           nav_enabled= False          
 
                         if body.startswith(("DONE ", "ACK ", "BUSY ")):
                             teensy_events.put(body)          # queue "DONE H", not "1016295 DONE H"
+
+                        #10/24/26 Added to notify main loop of '!STUCK_AHEAD' detection
+                        if "!Stuck_Ahead" in body:
+                            drain_scan_queue()                  # clear any old scan data
+                            stuck_ahead_event.set()          # threading.Event created at module level
+                            # optional: also log it
+                            log("Teensy reports STUCK_AHEAD")
 
                         if "IMU Heading" in body:
                             try:
@@ -201,7 +223,30 @@ def telemetry_loop():
                                 t_msec = int(line.strip().split(":", 1)[0].split()[0])
                                 set_imu_hdg(hdg, t_msec)
                             except (ValueError, IndexError):
-                                log(f"bad IMU line: {line!r}")                        
+                                log(f"bad IMU line: {line!r}")
+
+                        if "!TEENSY_TIME" in body:
+                            log("Teensy reports time sync")
+                            teensy_time = int(body.split("!TEENSY_TIME")[1].strip().split()[0])
+                            log(f"Teensy time: {teensy_time} msec")
+
+                        #10/24/26 Added to collect scan data for '!STUCK_AHEAD' detection
+                        if "!SCAN_START" in body:
+                            drain_scan_queue()                  # clear any old scan data
+                            scan_rows = []
+                            collecting = True
+                        elif collecting and "!SCAN_END" in body:
+                            collecting = False
+                            scan_queue.put(scan_rows)       # hand the whole table over
+                            scan_ready.set()
+                        elif collecting:
+                            # parse a data line into (msec, dist, hdg) and append
+                            parts = body.split()
+                            if len(parts) >= 3:
+                                try:
+                                    scan_rows.append((int(parts[0]), float(parts[1]), float(parts[2])))
+                                except ValueError:
+                                    pass                       
                 except Exception as e:
                     print(f"[telemetry] {e}")
             time.sleep(0.02)# ----------------------------------------------------------------------
@@ -775,9 +820,9 @@ def wait_for_done(cmd: str, timeout: float):
                 send_raw("5")
                 log("Operator STOP during wait_for_done")
                 return "ABORT STOP"
-            if user in ("c", "cmd", "manual"):
-                send_raw("C")
-                enter_manual_mode("operator C during wait_for_done")
+            if user in ("m", "cmd", "manual"):
+                send_raw("M")
+                enter_manual_mode("operator M during wait_for_done")
                 return "ABORT MANUAL"
         remaining = deadline - time.time()
         if remaining <= 0:
@@ -1001,6 +1046,134 @@ def log_heading_after_tweak(cmd: str, reason: str):
     hdg = get_current_imu_hdg()
     log(f"tweak {cmd} ({reason}): IMU heading {hdg}")
    
+def get_stuck_ahead_recovery_heading() -> float:
+    """
+    When stuck-ahead is detected, scan 360° and find the best heading to turn to.
+    Returns the best heading in degrees (-).
+    """
+    log("Stuck-ahead recovery: scanning for best heading...")
+    catalog = []
+
+    # Stop and back up a bit
+    send_nav_seq([
+        ("5", "stop"),
+        ("D1", "delay 1s"),
+        (".", "set motors to reverse"),
+        ("8", "move backward 1s"),
+        ("D1", "delay 1s"),
+        ("5", "stop"),
+        ("D1", "delay 1s"),
+    ], "preparing for stuck-ahead scan")
+
+    send_nav_cmd("!STUCK_SCAN", "perform 360° scan", force=True, wait=False)
+
+    raw = scan_queue.get_nowait() if not scan_queue.empty() else []
+
+    if not raw:
+        log("Stuck-ahead recovery: no scan data available, using current heading")
+        best_hdg = get_current_imu_hdg() or 0.0
+        return best_hdg
+
+
+    print(f"Stuck-ahead recovery: scan_queue has {len(raw)} entries")
+    for hdg, depth, age in raw:
+        print(f"Stuck-ahead scan: heading={hdg:.1f}°, depth={depth:.0f} mm, age={age:.3f}s")
+
+    # --- parse -----------------------------------------------------------------
+    rows = []
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        if not line or "FrontD" in line:
+            continue
+        nums = re.findall(r"-?\d+\.?\d*", line.replace(" - ", " -"))
+        if len(nums) >= 3:
+            dist = float(nums[1])
+            hdg  = float(nums[2])
+            rows.append((hdg, dist))
+
+    hdg  = np.array([r[0] for r in rows])
+    dist = np.array([r[1] for r in rows])
+    N = len(hdg)
+    print(f"Parsed {N} samples")
+
+    # --- GetBestDistance (ported from RobotBestDistV2.cpp) --------------------
+    bestStart = -1
+    bestEnd   = -1
+    bestWidth = 0.0
+    numruns   = 0
+    runStart  = -1
+
+    def terminate_run(i):
+        global bestWidth, bestStart, bestEnd, numruns, runStart
+        width = hdg[i-1] - hdg[runStart]
+        if width > 180:  width -= 360
+        if width < -180: width += 360
+        width = abs(width)
+        if width > bestWidth:
+            bestWidth = width
+            bestStart = runStart
+            bestEnd   = i - 1
+        runStart = -1
+        numruns += 1
+
+    for i in range(N):
+        if dist[i] >= THRESHOLD:
+            if runStart < 0:
+                runStart = i
+            if i >= N - 1:
+                terminate_run(i + 1)   # close run that reaches the end
+        elif runStart >= 0:
+            terminate_run(i)
+
+    # wrap-around stitch
+    if dist[0] >= THRESHOLD and dist[N-1] >= THRESHOLD:
+        endRun = N - 1
+        while endRun > 0 and dist[endRun] >= THRESHOLD:
+            endRun -= 1
+        endRun += 1
+
+        startRun = 0
+        while startRun < N - 1 and dist[startRun] >= THRESHOLD:
+            startRun += 1
+        startRun -= 1
+
+        width = hdg[startRun] - hdg[endRun]
+        if width > 180:  width -= 360
+        if width < -180: width += 360
+        width = abs(width)
+
+        if width > bestWidth:
+            bestWidth = width
+            bestStart = endRun
+            bestEnd   = startRun
+            numruns -= 1
+
+        print(f"numruns = {numruns}, bestwidth = {bestWidth:.1f}, "
+            f"bestStart = {bestStart}, bestEnd = {bestEnd}")
+
+        # --- build win_idx from the computed bestStart/bestEnd --------------------
+        if bestStart <= bestEnd:
+            win_idx = list(range(bestStart, bestEnd + 1))
+        else:
+            # wrap-around
+            win_idx = list(range(bestStart, N)) + list(range(0, bestEnd + 1))
+
+            
+        bestHdg_idx = win_idx[len(win_idx) // 2]
+        bestHdg = hdg[bestHdg_idx]
+        bestDist = dist[bestHdg_idx]
+
+        print(f"bestHdg_idx = {bestHdg_idx}, bestHdg = {bestHdg:.1f}, bestDist = {bestDist:.1f}")
+        log(f"bestHdg_idx = {bestHdg_idx}, bestHdg = {bestHdg:.1f}, bestDist = {bestDist:.1f}")
+    
+    return best_hdg
+
+def drain_scan_queue():
+    while True:
+        try:
+            scan_queue.get_nowait()
+        except queue.Empty:
+            break
 
 # ----------------------------------------------------------------------
 # Main
@@ -1051,8 +1224,8 @@ def main():
     has_tty = sys.stdin.isatty()
     if has_tty:
         input("Press Enter for the command prompt (motors stay stopped until 'auto')...")
-        log("Ready – MANUAL (type auto to navigate, C or 5 to stop)")
-        print("Type 'help' for commands.  C = manual, auto = resume nav.\n")
+        log("Ready – MANUAL (type auto to navigate, M = manual, M or 5 to stop)")
+        print("Type 'help' for commands.  M = manual, auto = resume nav.\n")
         print("> ", end="", flush=True)
     else:
         log("No TTY – keyboard unavailable; staying MANUAL (AUTO_NAV_ON_START=False)")
@@ -1081,6 +1254,22 @@ def main():
 
         apply_nav_from_latest()
 
+        #10/24/26: Added to manage stuck-ahead event and recovery
+        if stuck_ahead_event.is_set():
+            stuck_ahead_event.clear()
+            if nav_enabled:
+                nav_enabled = False               
+                log("Stuck ahead detected — stopping nav")
+                send_nav_cmd("5", "stop for stuck-ahead recovery", force=True, wait=True)   
+                log("Stuck ahead detected — starting recovery")
+                best_heading = get_stuck_ahead_recovery_heading()          # the new SCAN-based version
+                print(F"Recovery heading: {best_heading:.1f}°")
+                send_nav_cmd(f"T{best_heading:.1f}", "turn to recovery heading", force=True, wait=True)
+                # send_nav_cmd("8", "resume forward motion after recovery")
+                nav_enabled = True
+            else:
+                log("STUCK_AHEAD ignored (not in auto-nav)")
+
         if user is None:
             continue
 
@@ -1101,7 +1290,7 @@ def main():
             send_raw("h")
             last_repeat_cmd = None 
         #     print_help()
-        elif low in ("c", "cmd", "manual"):
+        elif low in ("m", "cmd", "manual"):
             log(f"Received {user}: Entering MANUAL mode")
             enter_manual_mode("operator C / manual")
             last_repeat_cmd = None
@@ -1109,6 +1298,7 @@ def main():
         elif low in ("auto", "nav"):
             print("Resuming AUTO navigation...")
             enter_auto_mode("operator resume auto-nav")
+            send_raw("!TEENSY_TIME") # Request time sync
             last_repeat_cmd = None
         elif low in ("5", "stop"):
             send_raw("5")
