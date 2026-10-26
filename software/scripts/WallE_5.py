@@ -927,50 +927,19 @@ def send_nav_seq(steps, reason):
             break
 
 def find_clear_direction():
-    """Try to find a clear direction by rotating 360 degrees while recording 'best-direction'.
-       and heading for each step. Then turn to the best direction and resume forward motion."""
+    """Teensy performs the 360° LIDAR scan; Pi selects the heading."""
     global nav_enabled
-    
-    hdg = get_current_imu_hdg()
-
-    log(f"Finding clear direction starting at heading {hdg}°...")
-    steps = [
-        ("5", "stop"),
-        ("D1", "delay 1s"),
-        (".", "set motors to reverse"),
-        ("8", "move backward 1s"),
-        ("D1", "delay 1s"),
-        ("5", "stop"),
-        ("D1", "delay 1s"),
-    ]
-    send_nav_seq(steps, "preparing to find clear direction")
-    
-    catalog = [] #must exist before the loop to avoid dreaded 'NameError'
-
-    #send_nav_cmd("H", "get heading before scan", force=True, wait=True)
-    hdg = get_current_imu_hdg()
-    log(f"find_clear_direction: before start → heading {hdg}°")
-
-    send_nav_cmd("D1", "pause before scan", force=True, wait=True)
-
-    # for deg in range(0, 360, 45):
-    #     send_nav_cmd("L45", f"find_clear_direction turn {deg}°", force=True, wait=True)
-    #     hdg = get_current_imu_hdg()
-    #     time.sleep(0.5)  # allow vision to update
-    #     if latest_clearest is not None:
-    #         depth = latest_clearest.best_depth_mm
-    #         age = time.monotonic() - latest_clearest_rx
-    #     else:
-    #         depth = 0.0
-    #         age = -1.0
-
-    #10/06/26: Added to command a heading query after each L45 turn.
-    log("Recording depths around the compass ...")
-    steps = [
-        ("L45", "turn"),
-        ("D1", "delay 1s"),
-    ]
-
+    log("Stuck-ahead recovery: scanning for best heading...")
+    # optional short backup sequence here if you still want it
+    send_nav_cmd("!STUCK_SCAN", "start Teensy scan", force=True, wait=False)
+    if not scan_ready.wait(timeout=45):
+        log("scan timed out")
+        return
+    scan_ready.clear()
+    rows = scan_queue.get()
+    best_hdg = get_stuck_ahead_heading(rows)   # the polar_scan logic
+    send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading", force=True, wait=True)
+    send_nav_cmd("8", "resume forward", force=True, wait=False)
 #    for deg in range(0, 360, 45):
     for deg in range(45, 360, 45):
         # send_nav_cmd("L45", f"find_clear_direction turn {deg}°", force=True, wait=True)
