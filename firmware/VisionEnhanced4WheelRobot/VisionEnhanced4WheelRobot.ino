@@ -353,8 +353,12 @@ bool RollingTurn(bool b_ccw, bool b_fwd, float numDeg, float Kp, float Ki, float
 enum SystemStatus
 {
   STATUS_MANUAL_CONTROL = 0,
-  STATUS_AUTO_NAV
+  STATUS_AUTO_NAV,
+  STATUS_STUCK_AHEAD //added 10/25/26
 };
+
+const char* SystemStatusStrArray[] = { "MANUAL_CONTROL", "AUTO_NAV", "STUCK_AHEAD"};
+
 
 SystemStatus gl_SystemStatus = SystemStatus::STATUS_AUTO_NAV;
 
@@ -776,8 +780,15 @@ void setup()
 
 void loop()
 {
+  //gl_pSerPort->printf("%lu: Top of loop() gl_SystemStatus == %s\n", millis(), SystemStatusStrArray[gl_SystemStatus]);
   //added so Pi5 can control robot motors
   CheckForUserInput();
+
+  //skip rest of loop() if in manual control
+  if (gl_SystemStatus == SystemStatus::STATUS_MANUAL_CONTROL)
+  {
+    return; //this returns to a hidden main() function, which calls loop() again
+  }
 
   digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
 
@@ -798,9 +809,10 @@ void loop()
   UpdateAllEnvironmentParameters(); //added 10/13/26
 
 #ifndef NO_STUCK
-  if (IsStuckAhead())
+  if (IsStuckAhead() && gl_SystemStatus != SystemStatus::STATUS_STUCK_AHEAD) //10/25/26 added to suppress spam
   {
-    gl_pSerPort->printf("Stuck Ahead Detected at %lu: gl_FrontCm = %2.1f, FrontVar = %2.1f\n", millis(), gl_FrontCm, gl_Frontvar);
+    //gl_pSerPort->printf("Stuck Ahead Detected at %lu: gl_FrontCm = %2.1f, FrontVar = %2.1f\n", millis(), gl_FrontCm, gl_Frontvar);
+    gl_pSerPort->printf("%lu: !Stuck_Ahead\n", millis());
   }
 #endif // NO_STUCK
 
@@ -1098,7 +1110,7 @@ bool IsLeftMotorReversed()
 }
 
 //05/05/23 these three functions added to cover edge case where robot is in STUCK_AHEAD situation,
-//  but both motors are stopped ratherthan running in forward direction.  This occurs if robot gets 
+//  but both motors are stopped rather than running in forward direction.  This occurs if robot gets 
 //  stuck inside SpinTurn().  SpinTurn() will timeout and return false (with both motors stopped)
 //  and this will cause program to jump to top of loop().  This *should* cause STUCK_AHEAD to be
 //  detected, but it doesn't because it only checked for 'both motors forward', not 'both motors
@@ -2697,10 +2709,12 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     // Interactive Command Mode
     //---------------------------------------------------------------------
   //case 0x43: // 'C'
-  case 'C':
+  //case 'C':
+  case 'M': //10/25/26 changed to 'M'anual mode to be symmetric with new 'A'uto mode 
   //case 0x63: // 'c'
   {//needed to avoid "crosses initialization of int speed" compiler error
     gl_SystemStatus = SystemStatus::STATUS_MANUAL_CONTROL; //10/23/26 interrupts any ongoing sequences like scans
+    gl_pSerPort->printf("%lu: DONE MANUAL\n", millis());
     gl_pSerPort->printf("System Status changed to 'MANUAL_CONTROL: Stopping Motors\n\n");
     StopBothMotors(); //09/14/26 moved above menu printout
     //int speed = 0;
@@ -2734,6 +2748,10 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   }
   break;
 
+  case 'A': //Auto mode added 10/25/26
+    gl_SystemStatus = SystemStatus::STATUS_AUTO_NAV;
+    gl_pSerPort->printf("System Status changed to 'AUTO_NAV\n\n");
+    break;
 //-------------------------------------------------
 // Current IMU heading.
 //-------------------------------------------------
@@ -3041,9 +3059,16 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       gl_pSerPort->printf(F("%lu: 'stuck scan' request received\n"), millis());
       StopBothMotors();
       gl_AnomalyCode = ANOMALY_STUCK_AHEAD;
+      //gl_SystemStatus = SystemStatus::STATUS_MANUAL_CONTROL;
+      gl_SystemStatus = SystemStatus::STATUS_STUCK_AHEAD;
       RunToDaylightV2();
-      //gl_AnomalyCode = ANOMALY_NONE; //10/22/26 I don't think this is needed.
+      gl_pSerPort->printf(F("%lu: !SCAN_COMPLETE\n"), millis());
     }
+    if (strncmp(buff, "!TEENSY_TIME", bufflen) == 0)
+    {
+      gl_pSerPort->printf(F("%lu: !TEENSY_TIME = %lu\n"), millis(), millis());
+    }
+
     break;
   }
   default:
@@ -3054,7 +3079,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   } // end outer switch
 
 
-  //gl_pSerPort->printf(F("At exit from CheckForUserInput(), retval = %s\n"), retval? "TRUE": "FALSE");
+  gl_pSerPort->printf(F("At exit from CheckForUserInput(), retval = %s\n"), retval? "TRUE": "FALSE");
   return retval;
 }
 #pragma endregion OTA & DIRECT MOTOR CONTROL
@@ -4372,7 +4397,7 @@ void RunToDaylightV2()
   //gl_pSerPort->printf("In RunToDaylightV2()\n");
 //DEBUG!!
 
-  gl_pSerPort->printf("RunToDaylightV2(): arrays are\n");
+  gl_pSerPort->printf("!SCAN_START\n");
   gl_pSerPort->printf("MSec\tFrontD\tHdg\n");
   for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
   {
@@ -4393,6 +4418,7 @@ void RunToDaylightV2()
       frontD = FrontD[i];
     }
 
+    gl_pSerPort->printf("!SCAN_END\n");
     gl_pSerPort->printf("There are %d lines with FrontD > MIN_RUN_TO_DAYLIGHT_DIST_CM\n", i);
 
 }
