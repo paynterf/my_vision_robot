@@ -118,9 +118,6 @@ clearest_count = 0
 #10/24/26 part of '!STUCK_AHEAD' implementation
 global bestWidth, bestStart, bestEnd, numruns, runStart
 
-#10/27/26 Added to stop sending repeated 4/6 commands when '!STUCK_AHEAD' is detected
-recovery_in_progress = False
-
 
 # ----------------------------------------------------------------------
 # Utility
@@ -972,15 +969,15 @@ def get_current_imu_hdg(timeout=0.5):
 
 def strip_teensy_ts(line: str) -> str:
     s = line.strip()
-    # only strip a leading "12345:" timestamp, not a tab-separated data field
+    # "1016295 DONE H"  or  "1016294: IMU Heading = -1.35 Deg"
     if s[:1].isdigit():
         i = 0
         while i < len(s) and s[i].isdigit():
             i += 1
-        if i < len(s) and s[i] == ':':
+        if i < len(s) and s[i] in ":\t ":
             s = s[i+1:].lstrip()
-    return s
-    
+    return s    
+
 def log_heading_after_tweak(cmd: str, reason: str):
     """4 and 6 do not wait. Pause, then ask Teensy for the heading they stopped on."""
     time.sleep(1)
@@ -1069,7 +1066,6 @@ def drain_scan_queue():
 # ----------------------------------------------------------------------
 def main():
     global teensy_needs_command_mode, telemetry_running, nav_enabled, last_nav_cmd_sent
-    global recovery_in_progress
 
     print("\n========================================")
     print("       WallE_5 Supervisor Starting")
@@ -1144,13 +1140,11 @@ def main():
         apply_nav_from_latest()
 
         # Stuck-ahead recovery (Teensy scan + Pi heading selection)
-        # Stuck-ahead recovery (Teensy scan + Pi heading selection)
-        if stuck_ahead_event.is_set() and not recovery_in_progress:
+        if stuck_ahead_event.is_set():
             stuck_ahead_event.clear()
             if not nav_enabled:
                 log("STUCK_AHEAD ignored (not in auto-nav)")
             else:
-                recovery_in_progress = True
                 nav_enabled = False
                 log("Stuck ahead detected — starting recovery")
 
@@ -1165,21 +1159,17 @@ def main():
                 send_nav_cmd("!STUCK_SCAN", "start Teensy scan", force=True, wait=False)
                 if not scan_ready.wait(timeout=45):
                     log("scan timed out")
+                    nav_enabled = True
                 else:
                     scan_ready.clear()
                     rows = scan_queue.get()
                     best_hdg = get_stuck_ahead_recovery_heading(rows)
                     log(f"Recovery heading: {best_hdg:.1f}°")
+
                     send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading", force=True, wait=True)
+                    send_nav_cmd("8", "resume forward", force=True, wait=False)
+                    nav_enabled = True
 
-                send_nav_cmd("8", "resume forward", force=True, wait=False)
-                nav_enabled = True
-                recovery_in_progress = False
-                # drain any !Stuck_Ahead that arrived while we were busy
-                stuck_ahead_event.clear()
-
-        if not recovery_in_progress:
-            apply_nav_from_latest()
         if user is None:
             continue
 
