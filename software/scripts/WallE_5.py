@@ -27,6 +27,7 @@ import rclpy
 from rclpy.node import Node
 from my_vision_robot_msgs.msg import ClearestDirection
 import queue, threading
+import numpy as np
 
 teensy_events = queue.Queue()
 heading_events = queue.Queue()
@@ -633,7 +634,7 @@ def apply_nav_from_latest():
                 #     ],
                 #     f"TOO_CLOSE backup, depth={depth:.0f} mm",
                 # )
-            find_clear_direction()
+            # find_clear_direction()
             send_nav_cmd("8", "resume after TOO_CLOSE", force=True)
 
         # case 2:  # NO_VALID_DATA
@@ -800,7 +801,6 @@ def turn_timeout(cmd: str) -> float:
         return 3.0 + NAV_TURN_TIMEOUT_MARGIN_SEC
     return abs(deg) / max(rate, 1.0) + NAV_TURN_TIMEOUT_MARGIN_SEC
 
-
 def wait_for_done(cmd: str, timeout: float):
     """
     Block until Teensy DONE for this cmd, operator abort, or timeout.
@@ -926,51 +926,20 @@ def send_nav_seq(steps, reason):
             nav_enabled = False
             break
 
-def find_clear_direction():
-    """Teensy performs the 360° LIDAR scan; Pi selects the heading."""
-    global nav_enabled
-    log("Stuck-ahead recovery: scanning for best heading...")
-    # optional short backup sequence here if you still want it
-    send_nav_cmd("!STUCK_SCAN", "start Teensy scan", force=True, wait=False)
-    if not scan_ready.wait(timeout=45):
-        log("scan timed out")
-        return
-    scan_ready.clear()
-    rows = scan_queue.get()
-    best_hdg = get_stuck_ahead_heading(rows)   # the polar_scan logic
-    send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading", force=True, wait=True)
-    send_nav_cmd("8", "resume forward", force=True, wait=False)
-#    for deg in range(0, 360, 45):
-    for deg in range(45, 360, 45):
-        # send_nav_cmd("L45", f"find_clear_direction turn {deg}°", force=True, wait=True)
-        send_nav_seq(steps, f"find_clear_direction turn {deg}°")
-        hdg = get_current_imu_hdg()
-        log(f"find_clear_direction: turn {deg}° → heading {hdg}°")
-        time.sleep(0.5)  # allow vision to update
-        if latest_clearest is not None:
-            depth = latest_clearest.best_depth_mm
-            age = time.monotonic() - latest_clearest_rx
-        else:
-            depth = 0.0
-            age = -1.0
-
-            
-        catalog.append((hdg, depth, age))
-
-    log(f"find_clear_direction: heading {hdg}°, best_depth_mm={depth:.0f}, frame_age={age:.3f}s")
- 
-    best_hdg, best_dist, best_age = max(catalog, key=lambda sample: sample[1])
-    log(f"find_clear: best heading={best_hdg}°  depth={best_dist:.0f} mm  frame_age={best_age:.3f}s")
-
-    send_nav_cmd("5", "stop after 360° scan", force=True, wait=True)
-    send_nav_cmd("D5", "delay 5s", force=True, wait=True)
-
-    # print(catalog)
-    log("find_clear_direction catalog: [" +
-    ", ".join(f"({h:.1f}, {d:.1f}, {a:.3f}s)" for h, d, a in catalog) + "]")
-
-    send_nav_cmd(f"T{best_hdg:.1f}", f"turn to best heading {best_hdg}°", force=True, wait=True)
-    send_nav_cmd("8", "resume forward motion", force=True, wait=False)
+# def find_clear_direction():
+#     """Teensy performs the 360° LIDAR scan; Pi selects the heading."""
+#     global nav_enabled
+#     log("Stuck-ahead recovery: scanning for best heading...")
+#     # optional short backup sequence here if you still want it
+#     send_nav_cmd("!STUCK_SCAN", "start Teensy scan", force=True, wait=False)
+#     if not scan_ready.wait(timeout=45):
+#         log("scan timed out")
+#         return
+#     scan_ready.clear()
+#     rows = scan_queue.get()
+#     best_hdg = get_stuck_ahead_recovery_heading(rows)   # the polar_scan logic
+#     send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading", force=True, wait=True)
+#     send_nav_cmd("8", "resume forward", force=True, wait=False)
            
 #added 09/29/26 to manage teensy heading telemetry and avoid race conditions with latest_imu_hdg
 def set_imu_hdg(hdg, t_msec):
@@ -1015,65 +984,24 @@ def log_heading_after_tweak(cmd: str, reason: str):
     hdg = get_current_imu_hdg()
     log(f"tweak {cmd} ({reason}): IMU heading {hdg}")
    
-def get_stuck_ahead_recovery_heading() -> float:
-    """
-    When stuck-ahead is detected, scan 360° and find the best heading to turn to.
-    Returns the best heading in degrees (-).
-    """
-    log("Stuck-ahead recovery: scanning for best heading...")
-    catalog = []
+def get_stuck_ahead_recovery_heading(rows) -> float:
+    """rows = list of (msec, dist, hdg) from the Teensy scan."""
+    if not rows:
+        log("no scan data")
+        return get_current_imu_hdg() or 0.0
 
-    # Stop and back up a bit
-    send_nav_seq([
-        ("5", "stop"),
-        ("D1", "delay 1s"),
-        (".", "set motors to reverse"),
-        ("8", "move backward 1s"),
-        ("D1", "delay 1s"),
-        ("5", "stop"),
-        ("D1", "delay 1s"),
-    ], "preparing for stuck-ahead scan")
-
-    send_nav_cmd("!STUCK_SCAN", "perform 360° scan", force=True, wait=False)
-
-    raw = scan_queue.get_nowait() if not scan_queue.empty() else []
-
-    if not raw:
-        log("Stuck-ahead recovery: no scan data available, using current heading")
-        best_hdg = get_current_imu_hdg() or 0.0
-        return best_hdg
-
-
-    print(f"Stuck-ahead recovery: scan_queue has {len(raw)} entries")
-    for hdg, depth, age in raw:
-        print(f"Stuck-ahead scan: heading={hdg:.1f}°, depth={depth:.0f} mm, age={age:.3f}s")
-
-    # --- parse -----------------------------------------------------------------
-    rows = []
-    for line in raw.strip().splitlines():
-        line = line.strip()
-        if not line or "FrontD" in line:
-            continue
-        nums = re.findall(r"-?\d+\.?\d*", line.replace(" - ", " -"))
-        if len(nums) >= 3:
-            dist = float(nums[1])
-            hdg  = float(nums[2])
-            rows.append((hdg, dist))
-
-    hdg  = np.array([r[0] for r in rows])
+    THRESHOLD = 200.0
+    hdg  = np.array([r[2] for r in rows])
     dist = np.array([r[1] for r in rows])
     N = len(hdg)
-    print(f"Parsed {N} samples")
 
-    # --- GetBestDistance (ported from RobotBestDistV2.cpp) --------------------
-    bestStart = -1
-    bestEnd   = -1
+    bestStart = bestEnd = -1
     bestWidth = 0.0
-    numruns   = 0
-    runStart  = -1
+    numruns = 0
+    runStart = -1
 
     def terminate_run(i):
-        global bestWidth, bestStart, bestEnd, numruns, runStart
+        nonlocal bestWidth, bestStart, bestEnd, numruns, runStart
         width = hdg[i-1] - hdg[runStart]
         if width > 180:  width -= 360
         if width < -180: width += 360
@@ -1090,52 +1018,41 @@ def get_stuck_ahead_recovery_heading() -> float:
             if runStart < 0:
                 runStart = i
             if i >= N - 1:
-                terminate_run(i + 1)   # close run that reaches the end
+                terminate_run(i + 1)
         elif runStart >= 0:
             terminate_run(i)
 
-    # wrap-around stitch
-    if dist[0] >= THRESHOLD and dist[N-1] >= THRESHOLD:
+    # wrap-around stitch (same as before)
+    if N > 1 and dist[0] >= THRESHOLD and dist[N-1] >= THRESHOLD:
         endRun = N - 1
         while endRun > 0 and dist[endRun] >= THRESHOLD:
             endRun -= 1
         endRun += 1
-
         startRun = 0
         while startRun < N - 1 and dist[startRun] >= THRESHOLD:
             startRun += 1
         startRun -= 1
-
         width = hdg[startRun] - hdg[endRun]
         if width > 180:  width -= 360
         if width < -180: width += 360
         width = abs(width)
-
         if width > bestWidth:
             bestWidth = width
             bestStart = endRun
             bestEnd   = startRun
             numruns -= 1
 
-        print(f"numruns = {numruns}, bestwidth = {bestWidth:.1f}, "
-            f"bestStart = {bestStart}, bestEnd = {bestEnd}")
+    if bestStart < 0:                       # no far run found
+        return float(hdg[np.argmax(dist)])
 
-        # --- build win_idx from the computed bestStart/bestEnd --------------------
-        if bestStart <= bestEnd:
-            win_idx = list(range(bestStart, bestEnd + 1))
-        else:
-            # wrap-around
-            win_idx = list(range(bestStart, N)) + list(range(0, bestEnd + 1))
+    if bestStart <= bestEnd:
+        win_idx = list(range(bestStart, bestEnd + 1))
+    else:
+        win_idx = list(range(bestStart, N)) + list(range(0, bestEnd + 1))
 
-            
-        bestHdg_idx = win_idx[len(win_idx) // 2]
-        bestHdg = hdg[bestHdg_idx]
-        bestDist = dist[bestHdg_idx]
+    bestHdg_idx = win_idx[len(win_idx) // 2]
+    return float(hdg[bestHdg_idx])
 
-        print(f"bestHdg_idx = {bestHdg_idx}, bestHdg = {bestHdg:.1f}, bestDist = {bestDist:.1f}")
-        log(f"bestHdg_idx = {bestHdg_idx}, bestHdg = {bestHdg:.1f}, bestDist = {bestDist:.1f}")
-    
-    return best_hdg
 
 def drain_scan_queue():
     while True:
@@ -1156,7 +1073,6 @@ def main():
 
     print(f"Telemetry log: {TELEMETRY_LOG}")
     rotate_telemetry_logs()
-    #print("In a second terminal run:  tail -f ~/my_vision_robot/logs/telemetry.log\n")
 
     NAV_LOG.parent.mkdir(parents=True, exist_ok=True)
     print(f"Supervisor log: {NAV_LOG}")
@@ -1167,18 +1083,18 @@ def main():
     if not open_serial():
         log("Could not open serial port. Exiting.")
         sys.exit(1)
-    enter_teensy_command_menu()#09/23/26 The only 'C' sent to the Teensy is at startup, so WallE_5.py can enter AUTO mode after OTA update without sending 'C' again
-    enter_manual_mode("startup") #09/20/26 added to make sure WallE_5.py sends '5' to Teensy after restart
+    enter_teensy_command_menu()
+    enter_manual_mode("startup")
 
-    # 2. Camera
-    #start_camera() #disabled to make sure camera is up and running before starting WallE_5.py
+    # 2. Camera (disabled – start externally)
+    # start_camera()
 
     # 3. Telemetry thread
     t = threading.Thread(target=telemetry_loop, daemon=True)
     t.start()
     log("Telemetry relay started")
 
-    # 4. ROS subscriber (clearest direction)
+    # 4. ROS subscriber
     try:
         start_ros_subscriber()
     except Exception as e:
@@ -1199,9 +1115,9 @@ def main():
     else:
         log("No TTY – keyboard unavailable; staying MANUAL (AUTO_NAV_ON_START=False)")
     threading.Thread(target=try_auto_nav, daemon=True).start()
-    
-    # 7. Interactive loop (CheckForManualOverride + apply auto-nav)
-    last_repeat_cmd = None   # near other locals in main(), or a global
+
+    # 7. Interactive loop
+    last_repeat_cmd = None
 
     while True:
         user = None
@@ -1223,21 +1139,36 @@ def main():
 
         apply_nav_from_latest()
 
-        #10/24/26: Added to manage stuck-ahead event and recovery
+        # Stuck-ahead recovery (Teensy scan + Pi heading selection)
         if stuck_ahead_event.is_set():
             stuck_ahead_event.clear()
-            if nav_enabled:
-                nav_enabled = False               
-                log("Stuck ahead detected — stopping nav")
-                send_nav_cmd("5", "stop for stuck-ahead recovery", force=True, wait=True)   
-                log("Stuck ahead detected — starting recovery")
-                best_heading = get_stuck_ahead_recovery_heading()          # the new SCAN-based version
-                print(F"Recovery heading: {best_heading:.1f}°")
-                send_nav_cmd(f"T{best_heading:.1f}", "turn to recovery heading", force=True, wait=True)
-                # send_nav_cmd("8", "resume forward motion after recovery")
-                nav_enabled = True
-            else:
+            if not nav_enabled:
                 log("STUCK_AHEAD ignored (not in auto-nav)")
+            else:
+                nav_enabled = False
+                log("Stuck ahead detected — starting recovery")
+
+                send_nav_seq([
+                    ("5", "stop"),
+                    ("D0.5", "pause"),
+                    (".", "reverse"),
+                    ("D1", "back up"),
+                    ("5", "stop"),
+                ], "pre-scan backup")
+
+                send_nav_cmd("!STUCK_SCAN", "start Teensy scan", force=True, wait=False)
+                if not scan_ready.wait(timeout=45):
+                    log("scan timed out")
+                    nav_enabled = True
+                else:
+                    scan_ready.clear()
+                    rows = scan_queue.get()
+                    best_hdg = get_stuck_ahead_recovery_heading(rows)
+                    log(f"Recovery heading: {best_hdg:.1f}°")
+
+                    send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading", force=True, wait=True)
+                    send_nav_cmd("8", "resume forward", force=True, wait=False)
+                    nav_enabled = True
 
         if user is None:
             continue
@@ -1257,22 +1188,21 @@ def main():
             break
         elif low in ("h", "heading request"):
             send_raw("h")
-            last_repeat_cmd = None 
-        #     print_help()
+            last_repeat_cmd = None
         elif low in ("m", "cmd", "manual"):
             log(f"Received {user}: Entering MANUAL mode")
             enter_manual_mode("operator C / manual")
             last_repeat_cmd = None
-            nav_enabled = False #added 09/22/26
+            nav_enabled = False
         elif low in ("auto", "nav"):
             print("Resuming AUTO navigation...")
             enter_auto_mode("operator resume auto-nav")
-            send_raw("!TEENSY_TIME") # Request time sync
+            send_raw("!TEENSY_TIME")
             last_repeat_cmd = None
         elif low in ("5", "stop"):
             send_raw("5")
             last_repeat_cmd = None
-        elif user[0].upper() in ("L", "R"):
+        elif user and user[0].upper() in ("L", "R"):
             send_raw(user.upper())
             last_repeat_cmd = user.upper()
         else:
@@ -1281,7 +1211,6 @@ def main():
 
         if has_tty:
             print("> ", end="", flush=True)
-        
 
     # Cleanup
     log("Shutting down WallE_5...")
@@ -1301,9 +1230,8 @@ def main():
             time.sleep(0.2)
         except Exception:
             pass
-        
         ser.close()
     log("Done.")
- 
+
 if __name__ == "__main__":
     main()
