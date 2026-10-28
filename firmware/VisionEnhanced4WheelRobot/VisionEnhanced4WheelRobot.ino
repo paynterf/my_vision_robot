@@ -3060,6 +3060,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       gl_AnomalyCode = ANOMALY_STUCK_AHEAD;
       gl_SystemStatus = SystemStatus::STATUS_STUCK_AHEAD;
       RunToDaylightV2();
+      InitFrontDistArray(); //re-initialize front array to reset variance calc
       gl_pSerPort->printf(F("%lu: !SCAN_COMPLETE\n"), millis());
     }
     if (strncmp(buff, "!TEENSY_TIME", bufflen) == 0)
@@ -4479,11 +4480,6 @@ void InitFrontDistArray()
     //to ensure var > STUCK_FRONT_VARIANCE_THRESHOLD for first FRONT_DIST_ARRAY_SIZE loops
     //array is initialized with sawtooth from 0 to MAX_FRONT_DISTANCE_CM
   //10/14/26 copied from WallE3_Git.ino & rev for float vs int
-
-  //06/12/22 removed gl_Frontmean
-  //gl_pSerPort->printf("InitFrontDistArray() top: prev_mean = %2.1f, prev_var = %2.1f\n",
-  //  gl_Frontmean, gl_Frontvar);
-  //gl_pSerPort->printf("InitFrontDistArray() top: prev_var = %2.1f\n", gl_Frontvar);
 
   float newval = 0;
   int bumpval = MAX_FRONT_DISTANCE_CM / FRONT_DIST_ARRAY_SIZE;
