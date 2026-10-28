@@ -880,13 +880,12 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
     if wait:
         drain_teensy_events()
 
-    #09/26/26 watch out for '8' (speed-up) being sent too often
     if cmd == "8":
         if last_speed_increment < NAV_MAX_SPEED_INCREMENT:
             last_speed_increment += 1
             print(f"last_speed_increment increased to {last_speed_increment}")
             send_raw(cmd)
-
+        
     elif cmd in ("4", "6"):
         send_raw(cmd)
         log_heading_after_tweak(cmd, reason)
@@ -1154,6 +1153,8 @@ def main():
             else:
                 nav_enabled = False
                 log("Stuck ahead detected — starting recovery")
+                last_speed_increment = 0
+                recovery_in_progress = True
 
                 send_nav_seq([
                     ("5", "stop"),
@@ -1175,6 +1176,7 @@ def main():
                     log(f"Recovery heading: {best_hdg:.1f}°")
 
                     send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading", force=True, wait=True)
+                    last_speed_increment = 0
                     send_nav_cmd("8", "resume forward", force=True, wait=False)
                     nav_enabled = True
 
