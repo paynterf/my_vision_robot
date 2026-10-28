@@ -787,26 +787,26 @@ void loop()
   //skip rest of loop() if in manual control
   if (gl_SystemStatus == SystemStatus::STATUS_MANUAL_CONTROL)
   {
+    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+
+    if (mSecSinceLastTelemetryUpdate >= TELEMETRY_PRINT_INTERVAL_MSEC)
+    {
+      mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
+      if (gl_bIsFirstLoopTelemetrySend)
+      {
+
+  #ifndef NO_TELEMETRY
+        gl_pSerPort->println(LoopTelemHdrStr);
+  #endif
+        gl_bIsFirstLoopTelemetrySend = false;
+      }
+      SendTelemetry();
+    }
+
+    UpdateAllEnvironmentParameters(); //added 10/13/26
     return; //this returns to a hidden main() function, which calls loop() again
   }
 
-  digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-
-  if (mSecSinceLastTelemetryUpdate >= TELEMETRY_PRINT_INTERVAL_MSEC)
-  {
-    mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
-    if (gl_bIsFirstLoopTelemetrySend)
-    {
-
-#ifndef NO_TELEMETRY
-      gl_pSerPort->println(LoopTelemHdrStr);
-#endif
-      gl_bIsFirstLoopTelemetrySend = false;
-    }
-    SendTelemetry();
-  }
-
-  UpdateAllEnvironmentParameters(); //added 10/13/26
 
 #ifndef NO_STUCK
   if (IsStuckAhead() && gl_SystemStatus != SystemStatus::STATUS_STUCK_AHEAD) //10/25/26 added to suppress spam
@@ -3053,13 +3053,11 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   {
     int bufflen = strlen(buff);
     gl_pSerPort->printf(F("%lu: 'In '!' case with buff = %s with length %d\n"), millis(), buff, bufflen);
-    //if (strncmp(buff, "!STUCK_SCAN", strlen("!STUCK_SCAN") == 0))
     if (strncmp(buff, "!STUCK_SCAN", bufflen) == 0)
     {
       gl_pSerPort->printf(F("%lu: 'stuck scan' request received\n"), millis());
       StopBothMotors();
       gl_AnomalyCode = ANOMALY_STUCK_AHEAD;
-      //gl_SystemStatus = SystemStatus::STATUS_MANUAL_CONTROL;
       gl_SystemStatus = SystemStatus::STATUS_STUCK_AHEAD;
       RunToDaylightV2();
       gl_pSerPort->printf(F("%lu: !SCAN_COMPLETE\n"), millis());
@@ -4373,6 +4371,8 @@ void RunToDaylightV2()
   //Notes:
   //  10/22/26 added line to check for user input between steps
 
+  gl_pSerPort->printf("!SCAN_START\n"); //tell Pi5 that the scan is starting
+
   //Step1: rotate 360deg in 10deg steps, filling arrays with the corresponding values
   for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
   {
@@ -4397,29 +4397,28 @@ void RunToDaylightV2()
   //gl_pSerPort->printf("In RunToDaylightV2()\n");
 //DEBUG!!
 
-  gl_pSerPort->printf("!SCAN_START\n");
   gl_pSerPort->printf("MSec\tFrontD\tHdg\n");
   for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
   {
     gl_pSerPort->printf("%lu\t%2.1f\t % 2.1f\n", Msec[i], FrontD[i], Hdg[i]);
     delay(50);
   }
-  gl_pSerPort->println();
 
-    //find out how many lines there are with FrontD > 1.5m
-    uint16_t i = 0;
-    float frontD = FrontD[i];
-    gl_pSerPort->printf("Msec\tFrontD\tHdg\n");
-    while (frontD >= MIN_RUN_TO_DAYLIGHT_DIST_CM)
+  //find out how many lines there are with FrontD > 1.5m
+  gl_pSerPort->printf("Msec\tFrontD\tHdg\n");
+  uint8_t numfar = 0;
+
+  for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
+  {
+    if (FrontD[i] >= MIN_RUN_TO_DAYLIGHT_DIST_CM)
     {
-      //tempHdg[i] = (Hdg[i] < 0) ? (360 + Hdg[i]) : Hdg[i];//have to watch for 180 -- -179 transition
-      gl_pSerPort->printf("%lu\t%2.1f\t%2.1f\n", Msec[i], FrontD[i], Hdg[i]);
-      i++;
-      frontD = FrontD[i];
+      gl_pSerPort->printf("%lu\t%2.1f\t % 2.1f\n", Msec[i], FrontD[i], Hdg[i]);
+      numfar++;
     }
+  }
 
-    gl_pSerPort->printf("!SCAN_END\n");
-    gl_pSerPort->printf("There are %d lines with FrontD > MIN_RUN_TO_DAYLIGHT_DIST_CM\n", i);
+  gl_pSerPort->printf("!SCAN_END\n");
+  gl_pSerPort->printf("There are %d lines with FrontD > MIN_RUN_TO_DAYLIGHT_DIST_CM\n", numfar);
 
 }
 
