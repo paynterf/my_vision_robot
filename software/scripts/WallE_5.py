@@ -226,10 +226,12 @@ def telemetry_loop():
                             except (ValueError, IndexError):
                                 log(f"bad IMU line: {line!r}")
 
-                        if "!TEENSY_TIME" in body:
-                            log("Teensy reports time sync")
-                            teensy_time = int(body.split("!TEENSY_TIME")[1].strip().split()[0])
-                            log(f"Teensy time: {teensy_time} msec")
+                        if body.startswith("!TEENSY_TIME"):
+                            try:
+                                teensy_time = int(body.split("=")[1].strip().split()[0])
+                                log(f"Teensy time: {teensy_time} msec")
+                            except (ValueError, IndexError):
+                                pass
 
                         #10/24/26 Added to collect scan data for '!STUCK_AHEAD' detection
                         if "!SCAN_START" in body:
@@ -969,15 +971,20 @@ def get_current_imu_hdg(timeout=0.5):
 
 def strip_teensy_ts(line: str) -> str:
     s = line.strip()
-    # "1016295 DONE H"  or  "1016294: IMU Heading = -1.35 Deg"
     if s[:1].isdigit():
         i = 0
         while i < len(s) and s[i].isdigit():
             i += 1
-        if i < len(s) and s[i] in ":\t ":
-            s = s[i+1:].lstrip()
-    return s    
-
+        if i < len(s):
+            sep = s[i]
+            rest = s[i+1:].lstrip()
+            # colon timestamp, or space timestamp followed by a word
+            # (DONE / ACK / BUSY / IMU ...). Do not strip tab-separated
+            # numeric scan rows.
+            if sep == ':' or (sep == ' ' and rest[:1].isalpha()):
+                s = rest
+    return s
+    
 def log_heading_after_tweak(cmd: str, reason: str):
     """4 and 6 do not wait. Pause, then ask Teensy for the heading they stopped on."""
     time.sleep(1)
@@ -1152,6 +1159,7 @@ def main():
                     ("5", "stop"),
                     ("D0.5", "pause"),
                     (".", "reverse"),
+                    ("8", "speed up"),
                     ("D1", "back up"),
                     ("5", "stop"),
                 ], "pre-scan backup")
