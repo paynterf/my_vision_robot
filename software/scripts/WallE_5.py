@@ -46,7 +46,8 @@ last_imu_hdg_t_msec = 0.0
 # Configuration
 # ----------------------------------------------------------------------
 SERIAL_PORT     = "/dev/ttyAMA0"
-BAUD            = 115200
+# BAUD            = 115200
+BAUD            = 230400  # 10/29/26 increased to 230400 for faster telemetry and OTA 
 CAMERA_SCRIPT   = Path.home() / "my_vision_robot/software/scripts/restart_camera.sh"
 
 # OTA configuration
@@ -66,7 +67,7 @@ NAV_COMMAND_INTERVAL_SEC = 0.8
 NAV_DEADBAND_DEG = 15.0   # was 6.0; includes 0° and ±10° (12:00, 11:00, 1:00)
 NAV_MAX_SPEED_INCREMENT = 1.0 #added 09/03/26
 NAV_DEFAULT_TURN_RATE_DEGPERSEC = 45.0 #must match teensy DEFAULT_TURN_RATE_DEGPERSEC
-NAV_HANDSHAKE_PREFIXES = ("L", "R", "0", "1", "T", "5" )  # add others if firmware blocks on them
+NAV_HANDSHAKE_PREFIXES = ("L", "R", "0", "1", "T", "5", "!" )  # add others if firmware blocks on them
 NAV_SEQ_CONTINUE_ON_FW_ABORT = True
 NAV_TURN_TIMEOUT_MARGIN_SEC = 4.0 #for debugging with Teensy on blocks
 NAV_LOG = Path.home() / "my_vision_robot/logs/nav.log"
@@ -88,6 +89,7 @@ MIN_RUN_TO_DAYLIGHT_DIST_CM = 100 # cm
 LOG_NONE = 0
 LOG_INFO = 1
 LOG_VERBOSE = 2
+LOG_DEBUG = 3
 LOG_LEVEL = LOG_VERBOSE   # <-- the one-line change
 
 # ----------------------------------------------------------------------
@@ -216,7 +218,7 @@ def telemetry_loop():
                             drain_scan_queue()                  # clear any old scan data
                             stuck_ahead_event.set()          # threading.Event created at module level
                             # optional: also log it
-                            log("Teensy reports STUCK_AHEAD")
+                            #log("Teensy reports STUCK_AHEAD")
 
                         if "IMU Heading" in body:
                             try:
@@ -685,7 +687,8 @@ def enter_auto_mode(reason: str = "auto"):
     global nav_enabled, last_nav_cmd_sent, last_speed_increment
     nav_enabled = True
     last_nav_cmd_sent = None
-    last_speed_increment = 1 #
+    send_raw("!RESET_FRONT_ARRAY") #reset front array to clear any stuck readings
+    last_speed_increment = 1 #only one 'speedup' allowed
     send_raw("/") #make sure robot is in forward mode when entering AUTO mode
     send_raw("8") #make sure robot is moving forward when entering AUTO mode
     log(f"AUTO NAV – {reason}")
@@ -804,17 +807,9 @@ def turn_timeout(cmd: str) -> float:
     return abs(deg) / max(rate, 1.0) + NAV_TURN_TIMEOUT_MARGIN_SEC
 
 def wait_for_done(cmd: str, timeout: float):
-    """
-    Block until Teensy DONE for this cmd, operator abort, or timeout.
-    Returns the DONE/ABORT line, or None on timeout.
-
-    Match the command letter after "DONE ", not the full token.
-    Firmware prints "DONE T" for "T79.7", "DONE H" for "H",
-    "DONE L45.00 deg..." for "L45".
-    """
     deadline = time.time() + timeout
-    trigger = cmd.strip().split(",")[0]  # "T79.7" from "T79.7,30"
-    kind = trigger[:1].upper()           # "T", "L", "R", "H", "5"
+    trigger = cmd.strip().split(",")[0]
+    kind = trigger[:1].upper()
     while time.time() < deadline:
         if sys.stdin.isatty() and select.select([sys.stdin], [], [], 0)[0]:
             user = sys.stdin.readline().strip().lower()
@@ -834,6 +829,7 @@ def wait_for_done(cmd: str, timeout: float):
         except queue.Empty:
             continue
         body = line.strip()
+        log(f"  wait saw: {body}")
         if body.startswith("DONE ABORT"):
             return body
         if body.startswith("DONE ") and kind and body[5:].startswith(kind):
@@ -881,9 +877,10 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
         drain_teensy_events()
 
     if cmd == "8":
+        log(f"send_nav_cmd: cmd=8, last_speed_increment={last_speed_increment}")
         if last_speed_increment < NAV_MAX_SPEED_INCREMENT:
             last_speed_increment += 1
-            print(f"last_speed_increment increased to {last_speed_increment}")
+            log(f"last_speed_increment increased to {last_speed_increment}")
             send_raw(cmd)
         
     elif cmd in ("4", "6"):
@@ -1072,6 +1069,7 @@ def drain_scan_queue():
 # ----------------------------------------------------------------------
 def main():
     global teensy_needs_command_mode, telemetry_running, nav_enabled, last_nav_cmd_sent
+    global last_speed_increment
 
     print("\n========================================")
     print("       WallE_5 Supervisor Starting")
@@ -1125,6 +1123,8 @@ def main():
     # 7. Interactive loop
     last_repeat_cmd = None
 
+    recovery_in_progress = False  # prevent nav during stuck-ahead recovery
+
     while True:
         user = None
         try:
@@ -1148,37 +1148,49 @@ def main():
         # Stuck-ahead recovery (Teensy scan + Pi heading selection)
         if stuck_ahead_event.is_set():
             stuck_ahead_event.clear()
-            if not nav_enabled:
-                log("STUCK_AHEAD ignored (not in auto-nav)")
+            if recovery_in_progress or not nav_enabled:
+                if LOG_LEVEL >= LOG_DEBUG:
+                    log("STUCK_AHEAD ignored (recovery in progress or nav disabled)")
             else:
+                recovery_in_progress = True
                 nav_enabled = False
                 log("Stuck ahead detected — starting recovery")
                 last_speed_increment = 0
-                recovery_in_progress = True
 
                 send_nav_seq([
                     ("5", "stop"),
-                    ("D0.5", "pause"),
-                    (".", "reverse"),
+                    ("!RESET_FRONT_ARRAY", "reset front array"),
+                    ("!REVERSE", "reverse"),
                     ("8", "speed up"),
-                    ("D1", "back up"),
+                    ("D1", "delay 1s"),
                     ("5", "stop"),
                 ], "pre-scan backup")
 
                 send_nav_cmd("!STUCK_SCAN", "start Teensy scan", force=True, wait=False)
                 if not scan_ready.wait(timeout=45):
                     log("scan timed out")
-                    nav_enabled = True
                 else:
                     scan_ready.clear()
                     rows = scan_queue.get()
                     best_hdg = get_stuck_ahead_recovery_heading(rows)
                     log(f"Recovery heading: {best_hdg:.1f}°")
 
-                    send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading", force=True, wait=True)
+                    send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading",
+                                force=True, wait=True)
                     last_speed_increment = 0
-                    send_nav_cmd("8", "resume forward", force=True, wait=False)
-                    nav_enabled = True
+ 
+                    send_nav_seq([
+                        ("5", "stop"),
+                        ("!RESET_FRONT_ARRAY", "reset front array"),
+                        ("!FORWARD", "forward"),
+                        ("8", "speed up")                    
+                    ], "restart navigation")
+
+                # drop any !Stuck_Ahead that arrived during the scan/turn
+                stuck_ahead_event.clear()
+                recovery_in_progress = False
+                nav_enabled = True
+
 
         if user is None:
             continue
