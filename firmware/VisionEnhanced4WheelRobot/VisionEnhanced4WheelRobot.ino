@@ -628,12 +628,10 @@ void setup()
 #pragma endregion PIN INITIALIZATION
 
 #pragma region SERIAL_PORTS
-  Serial.begin(115200);
+  Serial.begin(230400); //10/29/26 increased from 115200
   delay(2000); //10/06/21 - just use fixed delay instead
 
-  Serial.begin(115200);
-  delay(2000);
-  Serial1.begin(115200);
+  Serial1.begin(230400); //10/29/26 increased from 115200
   delay(2000);
 
   // Always point the global at the tee
@@ -787,28 +785,30 @@ void loop()
   //skip rest of loop() if in manual control
   if (gl_SystemStatus == SystemStatus::STATUS_MANUAL_CONTROL)
   {
-    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-
-    if (mSecSinceLastTelemetryUpdate >= TELEMETRY_PRINT_INTERVAL_MSEC)
-    {
-      mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
-      if (gl_bIsFirstLoopTelemetrySend)
-      {
-
-  #ifndef NO_TELEMETRY
-        gl_pSerPort->println(LoopTelemHdrStr);
-  #endif
-        gl_bIsFirstLoopTelemetrySend = false;
-      }
-      SendTelemetry();
-    }
-
-    UpdateAllEnvironmentParameters(); //added 10/13/26
     return; //this returns to a hidden main() function, which calls loop() again
   }
 
+  digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+
+  if (mSecSinceLastTelemetryUpdate >= TELEMETRY_PRINT_INTERVAL_MSEC)
+  {
+    mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
+    if (gl_bIsFirstLoopTelemetrySend)
+    {
+
+#ifndef NO_TELEMETRY
+      gl_pSerPort->println(LoopTelemHdrStr);
+#endif
+      gl_bIsFirstLoopTelemetrySend = false;
+    }
+    SendTelemetry();
+  }
+
+  UpdateAllEnvironmentParameters(); //added 10/13/26
+
 
 #ifndef NO_STUCK
+  //gl_pSerPort->printf("just before call to IsStuckAhead, gl_SystemStatus = %s\n", SystemStatusStrArray[gl_SystemStatus]);
   if (IsStuckAhead() && gl_SystemStatus != SystemStatus::STATUS_STUCK_AHEAD) //10/25/26 added to suppress spam
   {
     //gl_pSerPort->printf("Stuck Ahead Detected at %lu: gl_FrontCm = %2.1f, FrontVar = %2.1f\n", millis(), gl_FrontCm, gl_Frontvar);
@@ -2751,6 +2751,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   case 'A': //Auto mode added 10/25/26
     gl_SystemStatus = SystemStatus::STATUS_AUTO_NAV;
     gl_pSerPort->printf("System Status changed to 'AUTO_NAV\n\n");
+    InitFrontDistArray(); //added 10/28/26
     break;
 //-------------------------------------------------
 // Current IMU heading.
@@ -3039,6 +3040,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     gl_bIsForwardDir = false;
     //MoveReverse(speed, speed);
     StopBothMotors();
+    gl_pSerPort->printf(F("%lu DONE REV\n"), millis());//'.' isn't recognized by Pi5
     break;
 
   case '/':   // Forward
@@ -3053,7 +3055,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   {
     int bufflen = strlen(buff);
     gl_pSerPort->printf(F("%lu: 'In '!' case with buff = %s with length %d\n"), millis(), buff, bufflen);
-    if (strncmp(buff, "!STUCK_SCAN", bufflen) == 0)
+    if (strcmp(buff, "!STUCK_SCAN") == 0)
     {
       gl_pSerPort->printf(F("%lu: 'stuck scan' request received\n"), millis());
       StopBothMotors();
@@ -3062,10 +3064,34 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       RunToDaylightV2();
       InitFrontDistArray(); //re-initialize front array to reset variance calc
       gl_pSerPort->printf(F("%lu: !SCAN_COMPLETE\n"), millis());
+      gl_SystemStatus = SystemStatus::STATUS_AUTO_NAV;
     }
-    if (strncmp(buff, "!TEENSY_TIME", bufflen) == 0)
+
+    if (strcmp(buff, "!TEENSY_TIME") == 0) //10/29/26 bugfix
     {
       gl_pSerPort->printf(F("%lu: !TEENSY_TIME = %lu\n"), millis(), millis());
+    }
+
+    if (strcmp(buff, "!RESET_FRONT_ARRAY") == 0) //10/29/26 bugfix
+    {
+      InitFrontDistArray();
+      gl_pSerPort->printf(F("%lu: DONE !RESET_FRONT_ARRAY\n"), millis());
+    }
+
+    if (strcmp(buff, "!REVERSE") == 0) //added 10/29/26
+    {
+      gl_pSerPort->printf(F("%lu: Setting both motors to reverse\n"), millis());
+      gl_bIsForwardDir = false;
+      StopBothMotors();
+      gl_pSerPort->printf(F("%lu DONE !REVERSE\n"), millis());//'.' isn't recognized by Pi5
+    }
+
+    if (strcmp(buff, "!FORWARD") == 0) //added 10/29/26
+    {
+      gl_pSerPort->printf(F("%lu: Setting both motors to forward\n"), millis());
+      gl_bIsForwardDir = true;
+      StopBothMotors();
+      gl_pSerPort->printf(F("%lu DONE !FORWARD\n"), millis());//'.' isn't recognized by Pi5
     }
 
     break;
