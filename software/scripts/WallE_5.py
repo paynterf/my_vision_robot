@@ -46,8 +46,8 @@ last_imu_hdg_t_msec = 0.0
 # Configuration
 # ----------------------------------------------------------------------
 SERIAL_PORT     = "/dev/ttyAMA0"
-# BAUD            = 115200
-BAUD            = 230400  # 10/29/26 increased to 230400 for faster telemetry and OTA 
+BAUD            = 115200
+# BAUD            = 230400  # 10/29/26 increased to 230400 for faster telemetry and OTA 
 CAMERA_SCRIPT   = Path.home() / "my_vision_robot/software/scripts/restart_camera.sh"
 
 # OTA configuration
@@ -218,7 +218,7 @@ def telemetry_loop():
                             drain_scan_queue()                  # clear any old scan data
                             stuck_ahead_event.set()          # threading.Event created at module level
                             # optional: also log it
-                            #log("Teensy reports STUCK_AHEAD")
+                            log("Teensy reports STUCK_AHEAD")
 
                         if "IMU Heading" in body:
                             try:
@@ -612,34 +612,34 @@ def apply_nav_from_latest():
                     force=True,
                 )
 
-        case 2:  # TOO_CLOSE
-            #last_too_close_count += 1
-            last_too_close_count = TOO_CLOSE_DETECTION_WINDOW + 1
-            if last_too_close_count < TOO_CLOSE_DETECTION_WINDOW:
-                return
-            last_too_close_count = 0
-            send_nav_cmd(
-                "5",
-                f"TOO_CLOSE stop, depth={depth:.0f} mm",
-                force=True
-            )           
-            last_speed_increment = 0
+        # case 2:  # TOO_CLOSE
+        #     #last_too_close_count += 1
+        #     last_too_close_count = TOO_CLOSE_DETECTION_WINDOW + 1
+        #     if last_too_close_count < TOO_CLOSE_DETECTION_WINDOW:
+        #         return
+        #     last_too_close_count = 0
+        #     send_nav_cmd(
+        #         "5",
+        #         f"TOO_CLOSE stop, depth={depth:.0f} mm",
+        #         force=True
+        #     )           
+        #     last_speed_increment = 0
 
-            if depth < (MIN_BACKUP_CLEAR_DIST_CM * 10.0):
+        #     if depth < (MIN_BACKUP_CLEAR_DIST_CM * 10.0):
                 
-                log(f"TOO_CLOSE: depth={depth:.0f} mm < {MIN_BACKUP_CLEAR_DIST_CM*10:.0f} mm")
+        #         log(f"TOO_CLOSE: depth={depth:.0f} mm < {MIN_BACKUP_CLEAR_DIST_CM*10:.0f} mm")
 
-                # send_nav_seq(
-                #     [
-                #         (".", "reverse"),
-                #         ("8", "speed up"),
-                #         ("D1", "delay 1s"),
-                #         ("5", "stop"),
-                #     ],
-                #     f"TOO_CLOSE backup, depth={depth:.0f} mm",
-                # )
-            # find_clear_direction()
-            send_nav_cmd("8", "resume after TOO_CLOSE", force=True)
+        #         # send_nav_seq(
+        #         #     [
+        #         #         (".", "reverse"),
+        #         #         ("8", "speed up"),
+        #         #         ("D1", "delay 1s"),
+        #         #         ("5", "stop"),
+        #         #     ],
+        #         #     f"TOO_CLOSE backup, depth={depth:.0f} mm",
+        #         # )
+        #     # find_clear_direction()
+        #     send_nav_cmd("8", "resume after TOO_CLOSE", force=True)
 
         # case 2:  # NO_VALID_DATA
         #     last_no_data_count += 1
