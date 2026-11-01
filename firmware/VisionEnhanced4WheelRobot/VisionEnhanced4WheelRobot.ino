@@ -31,7 +31,7 @@ extern "C"
 //#define NO_VL53L1X //09/02/26 now only used for rear VL53L1X sensor
 //#define NO_IRDET //added 04/05/17 for daytime in-atrium testing (too much ambient IR)
 //#define DISTANCES_ONLY //added 11/14/18 to just display distances in infinite loop
-//#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
+#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
 //#define BATTERY_DISCHARGE //added 03/04/20 to discharge battery safely
 //#define PID_TUNING_TELEMETRY_ONLY //added 07/22/23 to facilitate PID tuning
 //#define CHG_STATION_PID_TUNING_TEST //added 11/16/23 to document this testing block & then commented out -
@@ -354,7 +354,8 @@ enum SystemStatus
 {
   STATUS_MANUAL_CONTROL = 0,
   STATUS_AUTO_NAV,
-  STATUS_STUCK_AHEAD //added 10/25/26
+  STATUS_STUCK_AHEAD, //added 10/25/26
+  STATUS_FIRMWARE_UPDATE
 };
 
 const char* SystemStatusStrArray[] = { "MANUAL_CONTROL", "AUTO_NAV", "STUCK_AHEAD"};
@@ -628,10 +629,12 @@ void setup()
 #pragma endregion PIN INITIALIZATION
 
 #pragma region SERIAL_PORTS
-  Serial.begin(230400); //10/29/26 increased from 115200
+  //Serial.begin(230400); //10/29/26 increased from 115200
+  Serial.begin(115200); //10/29/26 increased from 115200
   delay(2000); //10/06/21 - just use fixed delay instead
 
-  Serial1.begin(230400); //10/29/26 increased from 115200
+  //Serial1.begin(230400); //10/29/26 increased from 115200
+  Serial1.begin(115200); //10/29/26 increased from 115200
   delay(2000);
 
   // Always point the global at the tee
@@ -783,7 +786,7 @@ void loop()
   CheckForUserInput();
 
   //skip rest of loop() if in manual control
-  if (gl_SystemStatus == SystemStatus::STATUS_MANUAL_CONTROL)
+  if (gl_SystemStatus == SystemStatus::STATUS_MANUAL_CONTROL || gl_SystemStatus == SystemStatus::STATUS_FIRMWARE_UPDATE)
   {
     return; //this returns to a hidden main() function, which calls loop() again
   }
@@ -2575,11 +2578,6 @@ bool CheckForUserInput()
   //  11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
   //  08/07/26 rev to check for input on any serial port
 
-  //DEBUG!!
-  //gl_pSerPort->printf("%lu: In CheckForUserInput() with gl_pSerPort->available() = %s\n",
-  //  (uint32_t)gl_ElapsedRunMillisec, gl_pSerPort->available() > 0?"TRUE":"FALSE");
-
-  //const int bufflen = 10; //09/24/26 rev to make sure all chars are consumed
   const int bufflen = 20; //10/22/26 rev to handle full-string commands, i.e. 'STUCK_SCAN'
   char buff[bufflen];
   memset(buff, 0, bufflen);
@@ -2616,7 +2614,6 @@ bool CheckForUserInput()
   {
     // read the incoming byte: relies on having 'Both CR & LF' enabled at the bottom of the serial port window
     Serial1.readBytesUntil('\n', buff, sizeof(buff));
-    //*incomingByte = buff[0];
 
     // Convert to uppercase
     for (uint8_t i = 0; i < strlen(buff); i++)
@@ -2628,7 +2625,6 @@ bool CheckForUserInput()
     Serial1.printf("\n%lu: in CheckForUserInput got %s from Serial1\n", millis(), buff);
 
     //09/27/22 now just call CheckForUserInput(incomingByte)
-    //retval = CheckForUserInput(incomingByte);
     retval = CheckForUserInput(buff); //09/25/26 rev to pass entire input string
   }
 
@@ -2649,6 +2645,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   //  09/24/26 now only one switch for all incoming chars.
   //  10/22/26 All input is now uppercase - no need for lowercase entries
   //  10/22/26 rev to accommodate full-string commands
+  //  10/31/26 rev to use Serial1 only for the 'U' case
 
   //const int bufflen = 10;
   ////char buff[bufflen];
@@ -2673,32 +2670,32 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     //---------------------------------------------------------------------
   //case 0x55: // 'U'
   //case 0x75: // 'u'
-  case 'U':
+  case 'U':   //  10/31/26 rev to use Serial1 only for the 'U' case
 #pragma region FIRMWARE_UPDATE_MAIN
     StopBothMotors();
-    gl_pSerPort->printf(F("Start Program Update - Send new HEX file!\n"));
+    Serial1.printf(F("Start Program Update - Send new HEX file!\n"));
 
     if (firmware_buffer_init(&buffer_addr, &buffer_size) == 0)
     {
-      gl_pSerPort->printf("unable to create buffer\n");
-      Serial.flush();
+      Serial1.printf("unable to create buffer\n");
+      Serial1.flush();
       for (;;) {}
     }
 
-    gl_pSerPort->printf("buffer = %1luK %s (%08lX - %08lX)\n",
+    Serial1.printf("buffer = %1luK %s (%08lX - %08lX)\n",
       buffer_size / 1024,
       IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
       buffer_addr, buffer_addr + buffer_size);
 
     // Clear any pending serial data
-    while (Serial.available())  Serial.read();
+    //while (Serial.available())  Serial.read();
     while (Serial1.available()) Serial1.read();
 
     // Receive hex file (no return on success)
     update_firmware(&Serial1, &Serial1, buffer_addr, buffer_size);
 
     // If we get here → error or user abort
-    gl_pSerPort->printf("erase FLASH buffer / free RAM buffer...\n");
+    Serial1.printf("erase FLASH buffer / free RAM buffer...\n");
     firmware_buffer_free(buffer_addr, buffer_size);
     Serial1.flush();
     REBOOT;
@@ -3040,7 +3037,6 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     gl_bIsForwardDir = false;
     //MoveReverse(speed, speed);
     StopBothMotors();
-    gl_pSerPort->printf(F("%lu DONE REV\n"), millis());//'.' isn't recognized by Pi5
     break;
 
   case '/':   // Forward
