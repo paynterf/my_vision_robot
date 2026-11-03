@@ -97,6 +97,7 @@
   <ItemGroup>
     <ClInclude Include="..\..\..\Teensy_OTA_Base\FlasherX\FlashTxx.h" />
     <ClInclude Include="..\..\..\Teensy_OTA_Base\FlasherX\FXUtil.h" />
+    <ClInclude Include="my_vision_robot_enums.h" />
     <ClInclude Include="__vm\.VisionEnhanced4WheelRobot.vsarduino.h" />
   </ItemGroup>
   <PropertyGroup>

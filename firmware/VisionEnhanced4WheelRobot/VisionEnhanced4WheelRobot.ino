@@ -19,7 +19,7 @@ extern "C"
 #include <math.h>
 #include "TeePrint.h"//added 08/16/26 for multiple logging targets
 
-//#include "enums.h" //'local' header file for navigation 'state' enums
+#include "my_vision_robot_enums.h" //11/02/26 put back; inline definitions still cause intellisense errors
 
 #pragma region DEFINES
 //02/29/16 hardware defines
@@ -31,7 +31,7 @@ extern "C"
 //#define NO_VL53L1X //09/02/26 now only used for rear VL53L1X sensor
 //#define NO_IRDET //added 04/05/17 for daytime in-atrium testing (too much ambient IR)
 //#define DISTANCES_ONLY //added 11/14/18 to just display distances in infinite loop
-#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
+//#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
 //#define BATTERY_DISCHARGE //added 03/04/20 to discharge battery safely
 //#define PID_TUNING_TELEMETRY_ONLY //added 07/22/23 to facilitate PID tuning
 //#define CHG_STATION_PID_TUNING_TEST //added 11/16/23 to document this testing block & then commented out -
@@ -72,8 +72,7 @@ const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 1000; //added 09/25/23
 //const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 500; //09/21/26
 //const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 2000; //10/03/26
 const uint32_t TELEMETRY_HEADER_PRINT_INTERVAL_MSEC = 50 * TELEMETRY_PRINT_INTERVAL_MSEC; //added 09/01/26
-//#define IMU_HDG_CORRECTION_FACTOR 0.787401575 //added 10/03/26 this is 1/1.27, where 1.27 was derived from protractor vs IMUHdgDegVal readings
-#define IMU_HDG_CORRECTION_FACTOR 0.753405824 //rev 10/07/26 for better correction
+const uint16_t STUCK_AHEAD_PRINT_INTERVAL_MSEC = 1000; //added 11/01/26 to suppress spamming the Pi5
 
 elapsedMillis MsecSinceLastAdj; //added 05/24/22 for ParallelOrientation() routine
 elapsedMillis MsecSinceLastIRHomingAdj; //01/07/22 used for #ifdef IR_HOMING_ONLY block
@@ -83,7 +82,11 @@ elapsedMillis mSecSinceLastWallTrackUpdate;
 elapsedMillis MsecSinceLastFrontDistUpdate; //10/02/22 slower update rate needed for front LIDAR
 elapsedMillis mSecSinceLastTelemetryUpdate; //09/25/23 added to reduce telemetry printout frequency
 elapsedMillis mSecSinceLastTelemetryHeader; //09/25/23 added to reduce telemetry printout frequency
+elapsedMillis mSecSinceLastStuckAheadPrint; //09/25/23 added to suppress Pi5 spam
 #pragma endregion TIME INTERVALS
+
+//#define IMU_HDG_CORRECTION_FACTOR 0.787401575 //added 10/03/26 this is 1/1.27, where 1.27 was derived from protractor vs IMUHdgDegVal readings
+#define IMU_HDG_CORRECTION_FACTOR 0.753405824 //rev 10/07/26 for better correction
 
 #pragma region ADC CONSTANTS
 const float ADC_REF_VOLTS = 3.3; //teensy default for analog inputs
@@ -363,27 +366,27 @@ const char* SystemStatusStrArray[] = { "MANUAL_CONTROL", "AUTO_NAV", "STUCK_AHEA
 
 SystemStatus gl_SystemStatus = SystemStatus::STATUS_AUTO_NAV;
 
-enum AnomalyCode
-{
-  ANOMALY_NONE = 0,
-  ANOMALY_STUCK_AHEAD,
-  ANOMALY_STUCK_BEHIND,
-  ANOMALY_OBSTACLE_AHEAD,
-  ANOMALY_WALL_OFFSET_DIST_AHEAD,
-  ANOMALY_OBSTACLE_BEHIND,
-  ANOMALY_DEAD_BATTERY,
-  ANOMALY_CHARGER_CONNECTED, //added 05/22/22
-  ANOMALY_EXCESS_STEER_VAL, //added 05/19/23
-  ANOMALY_IR_BEAM_AVAILABLE, //added 08/20/23
-  ANOMALY_MIRRORED_SFC //added 01/21/24
-};
+//enum AnomalyCode
+//{
+//  ANOMALY_NONE = 0,
+//  ANOMALY_STUCK_AHEAD,
+//  ANOMALY_STUCK_BEHIND,
+//  ANOMALY_OBSTACLE_AHEAD,
+//  ANOMALY_WALL_OFFSET_DIST_AHEAD,
+//  ANOMALY_OBSTACLE_BEHIND,
+//  ANOMALY_DEAD_BATTERY,
+//  ANOMALY_CHARGER_CONNECTED, //added 05/22/22
+//  ANOMALY_EXCESS_STEER_VAL, //added 05/19/23
+//  ANOMALY_IR_BEAM_AVAILABLE, //added 08/20/23
+//  ANOMALY_MIRRORED_SFC //added 01/21/24
+//};
 
-//08/23/23 unused names removed
-const char* AnomalyStrArray[] = { "NONE", "STUCK_AHEAD", "STUCK_BEHIND", "OBSTACLE_AHEAD",
-                                  "WALL_OFFSET_DIST_AHEAD","OBSTACLE_BEHIND",
-                                  "DEAD_BATTERY", "CHARGER_CONNECTED",
-                                  "EXCESS_STEER_VAL", "IR_BEAM_AVAILABLE", "MIRRORED_SURFACE"
-};//02/08/23 added "OPEN_DOORWAY" 03/13/23 added "TRACKING_WRONG_WALL", 01/22/24 added "MIRRORED_SURFACE"
+////08/23/23 unused names removed
+//const char* AnomalyStrArray[] = { "NONE", "STUCK_AHEAD", "STUCK_BEHIND", "OBSTACLE_AHEAD",
+//                                  "WALL_OFFSET_DIST_AHEAD","OBSTACLE_BEHIND",
+//                                  "DEAD_BATTERY", "CHARGER_CONNECTED",
+//                                  "EXCESS_STEER_VAL", "IR_BEAM_AVAILABLE", "MIRRORED_SURFACE"
+//};//02/08/23 added "OPEN_DOORWAY" 03/13/23 added "TRACKING_WRONG_WALL", 01/22/24 added "MIRRORED_SURFACE"
 
 uint8_t gl_AnomalyCode = ANOMALY_NONE;
 
@@ -795,7 +798,8 @@ void loop()
 
   if (mSecSinceLastTelemetryUpdate >= TELEMETRY_PRINT_INTERVAL_MSEC)
   {
-    mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
+    //mSecSinceLastTelemetryUpdate -= TELEMETRY_PRINT_INTERVAL_MSEC;
+    mSecSinceLastTelemetryUpdate = 0; //11/01/26 bugfix
     if (gl_bIsFirstLoopTelemetrySend)
     {
 
@@ -812,9 +816,10 @@ void loop()
 
 #ifndef NO_STUCK
   //gl_pSerPort->printf("just before call to IsStuckAhead, gl_SystemStatus = %s\n", SystemStatusStrArray[gl_SystemStatus]);
-  if (IsStuckAhead() && gl_SystemStatus != SystemStatus::STATUS_STUCK_AHEAD) //10/25/26 added to suppress spam
+  //if (IsStuckAhead() && gl_SystemStatus != SystemStatus::STATUS_STUCK_AHEAD) //10/25/26 added to suppress spam
+  if (IsStuckAhead() && mSecSinceLastStuckAheadPrint >= STUCK_AHEAD_PRINT_INTERVAL_MSEC) //11/01/26 added to suppress spam
   {
-    //gl_pSerPort->printf("Stuck Ahead Detected at %lu: gl_FrontCm = %2.1f, FrontVar = %2.1f\n", millis(), gl_FrontCm, gl_Frontvar);
+    mSecSinceLastStuckAheadPrint = 0;
     gl_pSerPort->printf("%lu: !Stuck_Ahead\n", millis());
   }
 #endif // NO_STUCK
@@ -3515,6 +3520,80 @@ float GetHdgMatchVal(float tgt_deg, float cur_deg)
 }
 
  //10/04/26 modified per Grok to properly scale raw IMU headings
+//float UpdateIMUHdgValDeg()
+//{
+//  //Purpose: Get latest yaw (heading) value from IMU
+//  //Inputs: None.  This function should only be called after mpu.dmpPacketAvailable() returns TRUE
+//  //Outputs: 
+//  //	returns true if successful, otherwise false
+//  //	IMUHdgValDeg updated on success
+//  //Plan:
+//  //Step1: check for overflow and reset the FIFO if it occurs. In this case, wait for new packet
+//  //Step2: read all available packets to get to latest data
+//  //Step3: 10/05/26: calculate delta from last raw heading value
+//  //Step4: 10/05/26: scale delta by correction factor (1/1.27)
+//  //Step5: 10/05/26: add scaled delta to last adjusted value to produce current corrected heading
+//  //Step6: update IMUHdgValDeg with latest corrected heading after adjusting for 180/-179 split
+//  //Notes:
+//  //	10/08/19 changed return type to boolean
+//  //	10/08/19 no longer need mpuIntStatus
+//  //	10/21/19 completely rewritten to use Homer's algorithm
+//  //	05/05/20 changed return type to float vs bool.
+//  //  06/13/23 added code to update gl_HdgHistoryArray for 'spinning' condx detection
+//  //  10/04/26 added Grok code to properly correct raw IMU headings
+//
+//  //10/04/26 static makes them survive across calls for as long as the Teensy is powered
+//  static float prevRawDeg = 0;
+//  static float continuousDeg = 0;
+//  static bool haveYaw = false;
+//
+//  int flag = GetCurrentFIFOPacket(fifoBuffer, packetSize, MAX_GETPACKET_LOOPS); //get the latest mpu packet
+//
+//  if (flag != 0) //0 = error exit, 1 = normal exit, 2 = recovered from an overflow
+//  {
+//    // display Euler angles in degrees
+//    mpu.dmpGetQuaternion(&q, fifoBuffer);
+//    mpu.dmpGetGravity(&gravity, &q);
+//    mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+//
+//    //compute the yaw value
+//
+//    //10/03/26 added fudge factor to synch IMU output with physical reality
+//    float rawDeg = ypr[0] * 180.0f / M_PI;   // still -180 to +180
+//
+//    if (!haveYaw) 
+//    {
+//      prevRawDeg = rawDeg;
+//      continuousDeg = 0;    // heading at power-up is 0
+//      haveYaw = true;
+//    }
+//    else 
+//    {
+//      float step = rawDeg - prevRawDeg;
+//      if (step > 180.0f)  step -= 360.0f;   // crossed the fold backward
+//      if (step < -180.0f) step += 360.0f;   // crossed the fold forward
+//      continuousDeg += step * IMU_HDG_CORRECTION_FACTOR; //1.27 is the long scale from the protractor
+//      prevRawDeg = rawDeg;
+//    }
+//
+//    IMUHdgValDeg = continuousDeg;
+//    while (IMUHdgValDeg > 180.0f)  IMUHdgValDeg -= 360.0f;
+//    while (IMUHdgValDeg < -180.0f) IMUHdgValDeg += 360.0f;
+//  }
+//
+//  //06/13/23 added to update gl_HdgHistoryArray for 'spinning' condx detection
+//  //all array entries bumped up one, with most recent value at i = HEADING_HISTORY_ARRAY_SIZE-1
+//  for (uint16_t i = 1; i < HEADING_HISTORY_ARRAY_SIZE; i++)
+//  {
+//    gl_HdgHistoryArray[i - 1] = gl_HdgHistoryArray[i];
+//    //gl_pSerPort->printf("gl_HdgHistoryArray[%d] = %2.2f\n", i, gl_HdgHistoryArray[i]);
+//  }
+//  gl_HdgHistoryArray[HEADING_HISTORY_ARRAY_SIZE - 1] = IMUHdgValDeg;
+//
+//
+//  return IMUHdgValDeg;//05/05/20 now returns updated value for use convenience
+//}
+
 float UpdateIMUHdgValDeg()
 {
   //Purpose: Get latest yaw (heading) value from IMU
@@ -3525,11 +3604,11 @@ float UpdateIMUHdgValDeg()
   //Plan:
   //Step1: check for overflow and reset the FIFO if it occurs. In this case, wait for new packet
   //Step2: read all available packets to get to latest data
-  //Step3: 10/05/26: calculate delta from last raw heading value
+  //Step3: update IMUHdgValDeg with latest value
   //Step4: 10/05/26: scale delta by correction factor (1/1.27)
   //Step5: 10/05/26: add scaled delta to last adjusted value to produce current corrected heading
   //Step6: update IMUHdgValDeg with latest corrected heading after adjusting for 180/-179 split
-  //Notes:
+ //Notes:
   //	10/08/19 changed return type to boolean
   //	10/08/19 no longer need mpuIntStatus
   //	10/21/19 completely rewritten to use Homer's algorithm
@@ -3552,11 +3631,13 @@ float UpdateIMUHdgValDeg()
     mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
 
     //compute the yaw value
+    IMUHdgValDeg = ypr[0] * 180 / M_PI;
 
     //10/03/26 added fudge factor to synch IMU output with physical reality
     float rawDeg = ypr[0] * 180.0f / M_PI;   // still -180 to +180
 
-    if (!haveYaw) {
+    if (!haveYaw) 
+   {
       prevRawDeg = rawDeg;
       continuousDeg = 0;    // heading at power-up is 0
       haveYaw = true;
@@ -3575,7 +3656,7 @@ float UpdateIMUHdgValDeg()
   }
 
   //06/13/23 added to update gl_HdgHistoryArray for 'spinning' condx detection
-  //all array entries bumped up one, with most recent value at i = HEADING_HISTORY_ARRAY_SIZE-1
+  //all array entries bumped down one, with most recent value at i = HEADING_HISTORY_ARRAY_SIZE-1
   for (uint16_t i = 1; i < HEADING_HISTORY_ARRAY_SIZE; i++)
   {
     gl_HdgHistoryArray[i - 1] = gl_HdgHistoryArray[i];
@@ -3586,59 +3667,6 @@ float UpdateIMUHdgValDeg()
 
   return IMUHdgValDeg;//05/05/20 now returns updated value for use convenience
 }
-
-//float UpdateIMUHdgValDeg()
-//{
-//  //Purpose: Get latest yaw (heading) value from IMU
-//  //Inputs: None.  This function should only be called after mpu.dmpPacketAvailable() returns TRUE
-//  //Outputs: 
-//  //	returns true if successful, otherwise false
-//  //	IMUHdgValDeg updated on success
-//  //Plan:
-//  //Step1: check for overflow and reset the FIFO if it occurs. In this case, wait for new packet
-//  //Step2: read all available packets to get to latest data
-//  //Step3: update IMUHdgValDeg with latest value
-//  //Notes:
-//  //	10/08/19 changed return type to boolean
-//  //	10/08/19 no longer need mpuIntStatus
-//  //	10/21/19 completely rewritten to use Homer's algorithm
-//  //	05/05/20 changed return type to float vs bool.
-//  //  06/13/23 added code to update gl_HdgHistoryArray for 'spinning' condx detection
-//  //  10/04/26 added Grok code to properly scale raw IMU headings
-//
-//  //10/04/26 static makes them survive across calls for as long as the Teensy is powered
-//  static float prevRawDeg = 0;
-//  static float continuousDeg = 0;
-//  static bool haveYaw = false;
-//
-//  int flag = GetCurrentFIFOPacket(fifoBuffer, packetSize, MAX_GETPACKET_LOOPS); //get the latest mpu packet
-//
-//  if (flag != 0) //0 = error exit, 1 = normal exit, 2 = recovered from an overflow
-//  {
-//    // display Euler angles in degrees
-//    mpu.dmpGetQuaternion(&q, fifoBuffer);
-//    mpu.dmpGetGravity(&gravity, &q);
-//    mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-//
-//    //compute the yaw value
-//
-//    //10/03/26 added fudge factor to synch IMU output with physical reality
-//    //IMUHdgValDeg = ypr[0] * 180 / M_PI;
-//    IMUHdgValDeg = IMU_HDG_CORRECTION_FACTOR * ypr[0] * 180 / M_PI;
-//  }
-//
-//  //06/13/23 added to update gl_HdgHistoryArray for 'spinning' condx detection
-//  //all array entries bumped down one, with most recent value at i = HEADING_HISTORY_ARRAY_SIZE-1
-//  for (uint16_t i = 1; i < HEADING_HISTORY_ARRAY_SIZE; i++)
-//  {
-//    gl_HdgHistoryArray[i - 1] = gl_HdgHistoryArray[i];
-//    //gl_pSerPort->printf("gl_HdgHistoryArray[%d] = %2.2f\n", i, gl_HdgHistoryArray[i]);
-//  }
-//  gl_HdgHistoryArray[HEADING_HISTORY_ARRAY_SIZE - 1] = IMUHdgValDeg;
-//
-//
-//  return IMUHdgValDeg;//05/05/20 now returns updated value for use convenience
-//}
 
 uint8_t GetCurrentFIFOPacket(uint8_t* data, uint8_t length, uint16_t max_loops)
 {
@@ -3939,61 +3967,6 @@ uint8_t GetCurrentFIFOPacket(uint8_t* data, uint8_t length, uint16_t max_loops)
 //  StopBothMotors();
 //  //delay(1000); //added 04/27/21 for debug
 //  return bResult;
-//}
-
-//06/13/23 added to detect 'spinning out of control' condition
-//bool IsSpinning()
-//{
-//  //Purpose: detect 'spinning' condx
-//  //Inputs: 
-//  // gl_HdgHistoryArray = HEADING_HISTORY_ARRAY_SIZE element array of heading values
-//  //Outputs: returns TRUE if the cumulative heading change throughout the history array > 360
-//  //         else returns FALSE
-//
-//  bool result = false;
-//  float deltaHdg = 0;
-//  float cumHdg = 0;
-//  //gl_pSerPort->printf("\nHdg\tDHdg\tCumHdg\n");
-//  for (uint16_t i = 1; i < HEADING_HISTORY_ARRAY_SIZE - 1; i++)
-//  {
-//    //deltaHdg = abs(gl_HdgHistoryArray[i - 1] - gl_HdgHistoryArray[i]);
-//    deltaHdg = gl_HdgHistoryArray[i - 1] - gl_HdgHistoryArray[i];
-//
-//    //adjust for +180 to -179 transition
-//    if (deltaHdg > 180)
-//    {
-//      deltaHdg = deltaHdg - 360;
-//    }
-//    else if (deltaHdg < -180)
-//    {
-//      deltaHdg = deltaHdg + 360;
-//    }
-//
-//    cumHdg += deltaHdg;
-//
-//    //gl_pSerPort->printf("%2.2f\t%2.2f\t%2.2f\n", gl_HdgHistoryArray[i], deltaHdg, cumHdg); //prints out at end of line in "HDG_ONLY" mode
-//
-//    //if (cumHdg > 360)
-//    if (abs(cumHdg) > 360)
-//    {
-//      //DEBUG!!
-//      gl_pSerPort->printf("IsSpinning(): Spin condx detected with Hdg = %2.2f, cumHdg = %2.2f, idx = %d\n", gl_HdgHistoryArray[i - 1], cumHdg, i);
-//
-//      for (uint16_t i = 0; i < HEADING_HISTORY_ARRAY_SIZE; i++)
-//      {
-//        gl_pSerPort->printf("gl_HdgHistoryArray[%d] = %2.2f\n", i, gl_HdgHistoryArray[i]);
-//
-//      }
-//      //DEBUG!!
-//
-//      InitHeadingHistoryArray();//added 06/14/23
-//
-//      result = true;
-//      cumHdg = 0;
-//    }
-//  }
-//
-//  return result;
 //}
 
 void InitHeadingHistoryArray()
@@ -4610,7 +4583,5 @@ float  CalcBruteFrontDistArrayVariance()
 
   return brute_var;
 }
-
-
 
 #pragma endregion  RUN_TO_DAYLIGHT

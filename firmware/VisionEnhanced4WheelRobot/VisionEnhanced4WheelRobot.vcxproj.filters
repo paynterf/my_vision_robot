@@ -38,5 +38,8 @@
     <ClInclude Include="..\..\..\Teensy_OTA_Base\FlasherX\FXUtil.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="my_vision_robot_enums.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
