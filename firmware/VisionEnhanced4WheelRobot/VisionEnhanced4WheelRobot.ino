@@ -772,7 +772,7 @@ void setup()
 
 void loop()
 {
-  //gl_pSerPort->printf("%lu: Top of loop() gl_SystemStatus == %s\n", millis(), SystemStatusStrArray[gl_SystemStatus]);
+  //gl_pSerPort->printf("%lu: Top of loop() gl_AnomalyCode = %s\n", millis(), AnomalyCodeStrArray[gl_AnomalyCode]);
   //added so Pi5 can control robot motors
   CheckForUserInput();
 
@@ -2705,7 +2705,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   {//needed to avoid "crosses initialization of int speed" compiler error
     gl_AnomalyCode = AnomalyCode::ANOMALY_MANUAL_CONTROL; //10/23/26 interrupts any ongoing sequences like scans
     gl_pSerPort->printf("%lu: DONE MANUAL\n", millis());
-    gl_pSerPort->printf("System Status changed to 'MANUAL_CONTROL: Stopping Motors\n\n");
+    gl_pSerPort->printf("gl_AnomalyCode = AnomalyCode::ANOMALY_MANUAL_CONTROL: Stopping Motors\n\n");
     StopBothMotors(); //09/14/26 moved above menu printout
     //int speed = 0;
 
@@ -2740,7 +2740,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
 
   case 'A': //Auto mode added 10/25/26
     gl_AnomalyCode = AnomalyCode::ANOMALY_NONE;
-    gl_pSerPort->printf("System Status changed to 'AUTO_NAV\n\n");
+    gl_pSerPort->printf("gl_AnomalyCode = AnomalyCode::ANOMALY_NONE\n\n");
     InitFrontDistArray(); //added 10/28/26
     break;
 //-------------------------------------------------
