@@ -353,18 +353,6 @@ bool RollingTurn(bool b_ccw, bool b_fwd, float numDeg, float Kp, float Ki, float
 #pragma endregion HEADING_AND_RATE_BASED_TURN_PARAMETERS
 
 #pragma region ENUMS
-enum SystemStatus
-{
-  STATUS_MANUAL_CONTROL = 0,
-  STATUS_AUTO_NAV,
-  STATUS_STUCK_AHEAD, //added 10/25/26
-  STATUS_FIRMWARE_UPDATE
-};
-
-const char* SystemStatusStrArray[] = { "MANUAL_CONTROL", "AUTO_NAV", "STUCK_AHEAD"};
-
-
-SystemStatus gl_SystemStatus = SystemStatus::STATUS_AUTO_NAV;
 
 //enum AnomalyCode
 //{
@@ -789,7 +777,7 @@ void loop()
   CheckForUserInput();
 
   //skip rest of loop() if in manual control
-  if (gl_SystemStatus == SystemStatus::STATUS_MANUAL_CONTROL || gl_SystemStatus == SystemStatus::STATUS_FIRMWARE_UPDATE)
+  if (gl_AnomalyCode == AnomalyCode::ANOMALY_MANUAL_CONTROL)
   {
     return; //this returns to a hidden main() function, which calls loop() again
   }
@@ -815,9 +803,9 @@ void loop()
 
 
 #ifndef NO_STUCK
-  //gl_pSerPort->printf("just before call to IsStuckAhead, gl_SystemStatus = %s\n", SystemStatusStrArray[gl_SystemStatus]);
-  //if (IsStuckAhead() && gl_SystemStatus != SystemStatus::STATUS_STUCK_AHEAD) //10/25/26 added to suppress spam
-  if (IsStuckAhead() && mSecSinceLastStuckAheadPrint >= STUCK_AHEAD_PRINT_INTERVAL_MSEC) //11/01/26 added to suppress spam
+  if (IsStuckAhead() &&
+    gl_AnomalyCode == AnomalyCode::ANOMALY_NONE &&
+    mSecSinceLastStuckAheadPrint >= STUCK_AHEAD_PRINT_INTERVAL_MSEC)
   {
     mSecSinceLastStuckAheadPrint = 0;
     gl_pSerPort->printf("%lu: !Stuck_Ahead\n", millis());
@@ -2715,7 +2703,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   case 'M': //10/25/26 changed to 'M'anual mode to be symmetric with new 'A'uto mode 
   //case 0x63: // 'c'
   {//needed to avoid "crosses initialization of int speed" compiler error
-    gl_SystemStatus = SystemStatus::STATUS_MANUAL_CONTROL; //10/23/26 interrupts any ongoing sequences like scans
+    gl_AnomalyCode = AnomalyCode::ANOMALY_MANUAL_CONTROL; //10/23/26 interrupts any ongoing sequences like scans
     gl_pSerPort->printf("%lu: DONE MANUAL\n", millis());
     gl_pSerPort->printf("System Status changed to 'MANUAL_CONTROL: Stopping Motors\n\n");
     StopBothMotors(); //09/14/26 moved above menu printout
@@ -2751,7 +2739,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   break;
 
   case 'A': //Auto mode added 10/25/26
-    gl_SystemStatus = SystemStatus::STATUS_AUTO_NAV;
+    gl_AnomalyCode = AnomalyCode::ANOMALY_NONE;
     gl_pSerPort->printf("System Status changed to 'AUTO_NAV\n\n");
     InitFrontDistArray(); //added 10/28/26
     break;
@@ -3056,16 +3044,30 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   {
     int bufflen = strlen(buff);
     gl_pSerPort->printf(F("%lu: 'In '!' case with buff = %s with length %d\n"), millis(), buff, bufflen);
+
+    // !STUCK_ACK  (optional but recommended – stops alerts before the scan)
+    if (strcmp(buff, "!STUCK_ACK") == 0)
+    {
+      gl_AnomalyCode = AnomalyCode::ANOMALY_STUCK_AHEAD;
+      gl_pSerPort->printf(F("%lu: DONE !STUCK_ACK\n"), millis());
+    }
+
     if (strcmp(buff, "!STUCK_SCAN") == 0)
     {
       gl_pSerPort->printf(F("%lu: 'stuck scan' request received\n"), millis());
       StopBothMotors();
-      gl_AnomalyCode = ANOMALY_STUCK_AHEAD;
-      gl_SystemStatus = SystemStatus::STATUS_STUCK_AHEAD;
+      gl_AnomalyCode = AnomalyCode::ANOMALY_STUCK_AHEAD;
       RunToDaylightV2();
-      InitFrontDistArray(); //re-initialize front array to reset variance calc
+      InitFrontDistArray();
       gl_pSerPort->printf(F("%lu: !SCAN_COMPLETE\n"), millis());
-      gl_SystemStatus = SystemStatus::STATUS_AUTO_NAV;
+      // do not clear here
+    }
+
+    if (strcmp(buff, "!STUCK_CLEAR") == 0)
+    {
+      gl_AnomalyCode = AnomalyCode::ANOMALY_NONE;
+      InitFrontDistArray();
+      gl_pSerPort->printf(F("%lu: DONE !STUCK_CLEAR\n"), millis());
     }
 
     if (strcmp(buff, "!TEENSY_TIME") == 0) //10/29/26 bugfix
@@ -4373,9 +4375,9 @@ void RunToDaylightV2()
   for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
   {
     //10/23/26 added to abort scan on user 'C' input
-    if (gl_SystemStatus == SystemStatus::STATUS_MANUAL_CONTROL)
+    if (gl_AnomalyCode == AnomalyCode::ANOMALY_MANUAL_CONTROL)
     {
-      gl_pSerPort->printf("%lu: RunToDaylightV2(): gl_SystemStatus == SystemStatus::STATUS_MANUAL_CONTROL -> Scan Aborted\n", millis());
+      gl_pSerPort->printf("%lu: RunToDaylightV2(): gl_AnomalyCode = AnomalyCode::ANOMALY_MANUAL_CONTROL -> Scan Aborted\n", millis());
       return;
     }
 
