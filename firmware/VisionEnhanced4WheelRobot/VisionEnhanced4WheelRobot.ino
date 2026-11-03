@@ -772,7 +772,7 @@ void setup()
 
 void loop()
 {
-  //gl_pSerPort->printf("%lu: Top of loop() gl_AnomalyCode = %s\n", millis(), AnomalyCodeStrArray[gl_AnomalyCode]);
+  //gl_pSerPort->printf("%lu: Top of loop() gl_AnomalyCode = %s\n", millis(), AnomalyStrArray[gl_AnomalyCode]);
   //added so Pi5 can control robot motors
   CheckForUserInput();
 

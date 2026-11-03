@@ -39,7 +39,7 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="my_vision_robot_enums.h">
-      <Filter>Header Files</Filter>
+      <Filter>Misc Files</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
