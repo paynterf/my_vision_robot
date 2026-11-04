@@ -1152,6 +1152,7 @@ def main():
                 if LOG_LEVEL >= LOG_DEBUG:
                     log("STUCK_AHEAD ignored (recovery in progress or nav disabled)")
             else:
+                send_raw("!STUCK_ACK")  # Teensy ACK to clear the Stuck_Ahead
                 recovery_in_progress = True
                 nav_enabled = False
                 log("Stuck ahead detected — starting recovery")
@@ -1181,6 +1182,7 @@ def main():
  
                     send_nav_seq([
                         ("5", "stop"),
+                        ("!STUCK_CLEAR")
                         ("!RESET_FRONT_ARRAY", "reset front array"),
                         ("!FORWARD", "forward"),
                         ("8", "speed up")                    
