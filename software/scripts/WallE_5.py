@@ -1182,12 +1182,12 @@ def main():
  
                     send_nav_seq([
                         ("5", "stop"),
-                        ("!STUCK_CLEAR")
+                        ("!STUCK_CLEAR", "clear stuck state"),
                         ("!RESET_FRONT_ARRAY", "reset front array"),
                         ("!FORWARD", "forward"),
-                        ("8", "speed up")                    
+                        ("8", "speed up")
                     ], "restart navigation")
-
+                    
                 # drop any !Stuck_Ahead that arrived during the scan/turn
                 stuck_ahead_event.clear()
                 recovery_in_progress = False
