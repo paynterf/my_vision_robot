@@ -131,7 +131,7 @@ def log(msg: str, level: int = LOG_INFO) -> None:
     if level > LOG_LEVEL: #higher number = more verbose
         return
     line = f"[{timestamp()}] {msg}"
-    print(line, flush=True)
+    #print(line, flush=True) #11/07/26 echo to tmux panel disabled
     try:
         NAV_LOG.parent.mkdir(parents=True, exist_ok=True)
         with NAV_LOG.open("a") as f:
@@ -141,6 +141,13 @@ def log(msg: str, level: int = LOG_INFO) -> None:
 # ----------------------------------------------------------------------
 # Serial helpers
 # ----------------------------------------------------------------------
+def prompt(msg: str = None):
+    """Print an optional message, then always refresh the > prompt if we have a TTY."""
+    if msg:
+        print(msg, flush=True)
+    if sys.stdin.isatty():
+        print("> ", end="", flush=True)
+
 def open_serial(max_attempts: int = 10, flush: bool = True) -> bool:
     """Try to open the serial port. Returns True on success."""
     global ser
@@ -173,7 +180,7 @@ def send_turn(direction: str, degrees: float, rate: float = None):
     """
     direction = direction.upper()
     if direction not in ("L", "R"):
-        print("direction must be 'L' or 'R'")
+        prompt("direction must be 'L' or 'R'")
         return
 
     if rate is None:
@@ -519,7 +526,7 @@ help/C Show this help
 quit / exit  Exit WallE_5
 """
 
-    print(helptext)
+    prompt(helptext)
     log(helptext, level=LOG_VERBOSE)
 
 # ----------------------------------------------------------------------
@@ -679,8 +686,7 @@ def enter_manual_mode(reason: str = "manual override"):
     last_speed_increment = 0
     send_raw("5")
     log(f"MANUAL mode – {reason}")
-
-
+    prompt(f"MANUAL mode – {reason}")
 
 def enter_auto_mode(reason: str = "auto"):
     """WallE AUTO only. Teensy must already be in the command menu."""
@@ -692,12 +698,12 @@ def enter_auto_mode(reason: str = "auto"):
     send_raw("/") #make sure robot is in forward mode when entering AUTO mode
     send_raw("8") #make sure robot is moving forward when entering AUTO mode
     log(f"AUTO NAV – {reason}")
-
+#    prompt(f"AUTO NAV – {reason}")
 
 def try_auto_nav():
     if not AUTO_NAV_ON_START:
         log("AUTO_NAV_ON_START is False – staying manual")
-        print("> ", end="", flush=True)
+        prompt()
         return
 
     log("Auto-nav: waiting for system to settle...")
@@ -844,9 +850,11 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
     wait=False (default): fire-and-forget (vision nudges 4/6/8/5).
     Returns False if a waited motion timed out or was aborted.
     09/26/26: Added last_speed_increment logic to prevent '8' being sent too often
+    11/07/26: 'print()' changed to 'prompt()' and suppressed unless LOG_LEVEL >= LOG_DEBUG
     """
     global last_nav_cmd_sent, last_nav_cmd_time, last_speed_increment
-    print(f"send_nav_cmd: cmd={cmd}, reason={reason}, force={force}, wait={wait}")
+    if LOG_LEVEL >= LOG_DEBUG:
+        prompt(f"send_nav_cmd: cmd={cmd}, reason={reason}, force={force}, wait={wait}")
 
 
     cmd = (cmd or "").strip()
@@ -1112,10 +1120,10 @@ def main():
     # 6. Stay MANUAL until operator types 'auto'
     has_tty = sys.stdin.isatty()
     if has_tty:
-        input("Press Enter for the command prompt (motors stay stopped until 'auto')...")
         log("Ready – MANUAL (type auto to navigate, M = manual, M or 5 to stop)")
         print("Type 'help' for commands.  M = manual, auto = resume nav.\n")
-        print("> ", end="", flush=True)
+        input("Press Enter for the command prompt (motors stay stopped until 'auto')...")
+     #   prompt()
     else:
         log("No TTY – keyboard unavailable; staying MANUAL (AUTO_NAV_ON_START=False)")
     threading.Thread(target=try_auto_nav, daemon=True).start()
@@ -1141,7 +1149,7 @@ def main():
             enter_teensy_command_menu()
             enter_manual_mode("post-OTA")
             if has_tty:
-                print("> ", end="", flush=True)
+                prompt()
 
         apply_nav_from_latest()
 
@@ -1203,7 +1211,7 @@ def main():
                 log(f"repeat → {user}")
             else:
                 if has_tty:
-                    print("> ", end="", flush=True)
+                    prompt()
                 continue
 
         low = user.lower()
@@ -1215,10 +1223,12 @@ def main():
             last_repeat_cmd = None
         elif low in ("m", "cmd", "manual"):
             log(f"Received {user}: Entering MANUAL mode")
-            enter_manual_mode("operator C / manual")
+            print("Entering MANUAL mode")
+            enter_manual_mode("operator M / manual")
             last_repeat_cmd = None
             nav_enabled = False
         elif low in ("auto", "nav"):
+            log(f"Received {user}: Resuming AUTO navigation...")
             print("Resuming AUTO navigation...")
             enter_auto_mode("operator resume auto-nav")
             send_raw("!TEENSY_TIME")
@@ -1234,7 +1244,7 @@ def main():
             last_repeat_cmd = user if user in ("4", "6", "8", "2", ".", "/", "0", "1") else None
 
         if has_tty:
-            print("> ", end="", flush=True)
+            prompt()
 
     # Cleanup
     log("Shutting down WallE_5...")
