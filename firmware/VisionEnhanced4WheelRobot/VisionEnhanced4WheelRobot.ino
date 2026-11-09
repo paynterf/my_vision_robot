@@ -291,7 +291,7 @@ const bool TURNDIR_CCW = true;
 const bool TURNDIR_CW = false;
 
 //Motor direction variables
-bool gl_bIsForwardDir = true; //default is foward direction
+bool gl_bIsForwardDir = true; //default is forward direction
 
 #pragma endregion Motor Parameters
 
@@ -343,7 +343,7 @@ float gl_HdgHistoryArray[HEADING_HISTORY_ARRAY_SIZE];
 
 //02/16/22 fwd decl reqd for fcns using default param
 //09/16/23 added RunBothMotorsMsec with default params
-bool SpinTurn(bool b_ccw, float numDeg, float degPersec = DEFAULT_TURN_RATE_DEGPERSEC);
+bool SpinTurn(bool b_ccw, float numDeg, float degPersec = DEFAULT_TURN_RATE_DEGPERSEC, bool stopAtEnd = true);
 
 //06/01/24 chg int gl_Leftspeednum to uint16_t leftspeednum, int gl_Rightspeednum to uint16_t rightspeednum
 void RunBothMotorsMsec(bool bisFwd, int timeMsec = 500, uint16_t leftspeednum = MOTOR_SPEED_HALF, uint16_t rightspeednum = MOTOR_SPEED_HALF);
@@ -620,12 +620,10 @@ void setup()
 #pragma endregion PIN INITIALIZATION
 
 #pragma region SERIAL_PORTS
-  //Serial.begin(230400); //10/29/26 increased from 115200
-  Serial.begin(115200); //10/29/26 increased from 115200
+  Serial.begin(230400); //10/29/26 increased from 115200
   delay(2000); //10/06/21 - just use fixed delay instead
 
-  //Serial1.begin(230400); //10/29/26 increased from 115200
-  Serial1.begin(115200); //10/29/26 increased from 115200
+  Serial1.begin(230400); //10/29/26 increased from 115200
   delay(2000);
 
   // Always point the global at the tee
@@ -2918,7 +2916,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       }
       else
       {
-        MoveAhead(gl_Leftspeednum, gl_Rightspeednum);
+        MoveReverse(gl_Leftspeednum, gl_Rightspeednum);//11/07/26 bugfix
       }
     }
     else
@@ -2946,7 +2944,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       }
       else
       {
-        MoveAhead(gl_Leftspeednum, gl_Rightspeednum);
+        MoveReverse(gl_Leftspeednum, gl_Rightspeednum); //11/07/26 bugfix
       }
     }
     else
@@ -2975,7 +2973,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
 
     if (gl_bIsForwardDir)
     {
-      gl_pSerPort->printf(F("%lu: Calling MoveAhead with Speed %d\n"), millis(), gl_Leftspeednum);
+      //gl_pSerPort->printf(F("%lu: Case 8: Calling MoveAhead with Speed %d\n"), millis(), gl_Leftspeednum);
       MoveAhead(gl_Leftspeednum, gl_Rightspeednum);
     }
     else
@@ -2994,7 +2992,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     }
     gl_Rightspeednum = gl_Leftspeednum;
 
-    gl_pSerPort->printf(F("%lu: Speed now %d\n"), millis(), gl_Leftspeednum);
+    //gl_pSerPort->printf(F("%lu: Case 2: Speed now %d\n"), millis(), gl_Leftspeednum);
     if (gl_bIsForwardDir)
     {
       MoveAhead(gl_Rightspeednum, gl_Leftspeednum);
@@ -3097,6 +3095,22 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       gl_pSerPort->printf(F("%lu DONE !FORWARD\n"), millis());//'.' isn't recognized by Pi5
     }
 
+    if (strncmp(buff, "!TWEAK_", 7) == 0) 
+{
+      char dir = buff[7];                     // 'L' or 'R'
+      float deg = atof(buff + 8);             // rest of string → float
+      if (deg < 0) deg = -deg;                // always positive magnitude
+      if (deg > 45.0f) deg = 45.0f;           // safety clamp (optional)
+
+      bool left = (dir == 'L' || dir == 'l');
+
+      // SpinTurn now has the new defaulted argument
+      SpinTurn(left, deg, DEFAULT_TURN_RATE_DEGPERSEC, false);
+
+      Serial.println("DONE !TWEAK");
+      return true;
+    }
+
     break;
   }
   default:
@@ -3113,7 +3127,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
 #pragma endregion OTA & DIRECT MOTOR CONTROL
 
 #pragma region HDG_BASED_TURN_SUPPORT
-bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-rate arg (default = TURN_RATE_TARGET_DEGPERSEC)
+bool SpinTurn(bool b_ccw, float numDeg, float degPersec, bool stopAtEnd) //11/07/26 added stopAtEnd argument (default = true)
 {
   //Purpose: Make a numDeg CW or CCW 'spin' turn
   //Inputs:
@@ -3136,12 +3150,23 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
   //	11/14/21 removed 'first time skip' block; added motor start before entering loop
   //  03/22/22 added code to ensure numDeg >= 0
   //  06/01/22 now using MOTOR_SPEED_HALF for max motor speed and MOTOR_SPEED_OFF for low end
+  //  11/07/26 added stopAtEnd default argument (default = true) 
 
   float tgt_deg;
   float timeout_sec;
   bool bDoneTurning = false;
   bool bTimedOut = false;
   bool bResult = true; //04/21/20 added so will be only one exit point
+
+  //11/07/26 store starting motor speeds & dirs in case it is needed at end.
+  uint16_t leftmotorspeed = gl_Leftspeednum;
+  uint16_t rightmotorspeed = gl_Rightspeednum;
+  bool b_RightMotorForward = IsRightMotorForward();
+  bool b_LeftMotorForward = IsLeftMotorForward();
+
+  //gl_pSerPort->printf("In SpinTurn(%s, %2.2f, %2.2f, %s): leftspd = %d, leftdir = %s, rtspd = %d, rtdir = %s \n",
+  //  b_ccw == TURNDIR_CCW ? "CCW" : "CW", numDeg, degPersec, stopAtEnd? "TRUE":"FALSE", leftmotorspeed,
+  //  b_LeftMotorForward? "FWD" : "REV", rightmotorspeed, b_RightMotorForward? "FWD" : "REV");
 
   numDeg = abs(numDeg);//  03/22/22 added to ensure numDeg >= 0
   //DEBUG!!
@@ -3358,7 +3383,15 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec) //04/25/21 added turn-r
 
   //gl_pSerPort->printf("average turn rate = %2.1f\n", avgrate);
 
-  StopBothMotors();
+  if (stopAtEnd)
+  {
+    StopBothMotors();
+  }
+  else
+  {
+    SetLeftMotorDirAndSpeed(b_LeftMotorForward, leftmotorspeed);
+    SetRightMotorDirAndSpeed(b_RightMotorForward, rightmotorspeed);
+  }
   //gl_pSerPort->printf("RearCm = %3.2f\n", GetFrontDistCm());
 
   //gl_pSerPort->printf("Exiting SpinTurn() with bResult = %d\n", bResult);
