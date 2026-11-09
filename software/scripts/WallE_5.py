@@ -46,8 +46,8 @@ last_imu_hdg_t_msec = 0.0
 # Configuration
 # ----------------------------------------------------------------------
 SERIAL_PORT     = "/dev/ttyAMA0"
-BAUD            = 115200
-# BAUD            = 230400  # 10/29/26 increased to 230400 for faster telemetry and OTA 
+#BAUD            = 115200
+BAUD            = 230400  # 10/29/26 increased to 230400 for faster telemetry and OTA 
 CAMERA_SCRIPT   = Path.home() / "my_vision_robot/software/scripts/restart_camera.sh"
 
 # OTA configuration
@@ -72,6 +72,7 @@ NAV_SEQ_CONTINUE_ON_FW_ABORT = True
 NAV_TURN_TIMEOUT_MARGIN_SEC = 4.0 #for debugging with Teensy on blocks
 NAV_LOG = Path.home() / "my_vision_robot/logs/nav.log"
 NAV_LOG_MAX_DAYS = 3 * SECONDS_PER_DAY #open this back up to 30 days if you want to keep more history, but it will take up more space
+NAV_MAX_TWEAK_DEG = 15.0 #11/08/26 added for L/R 'tweak' limit
 
 # Startup / auto-nav (default = drive; C = manual override)
 AUTO_NAV_ON_START = False
@@ -607,15 +608,18 @@ def apply_nav_from_latest():
                 )
 
             elif turn_deg < 0:
+                # non-stopping left tweak; magnitude is |turn_deg| clamped for safety
+                mag = min(abs(turn_deg), NAV_MAX_TWEAK_DEG) 
                 send_nav_cmd(
-                    "4",
-                    f"left (turn_deg={turn_deg:.1f})",
+                    f"!TWEAK_L{mag:.1f}",
+                    f"left tweak {mag:.1f} (turn_deg={turn_deg:.1f})",
                     force=True,
                 )
             else:
-                 send_nav_cmd(
-                    "6",
-                    f"right (turn_deg={turn_deg:.1f})",
+                mag = min(abs(turn_deg), NAV_MAX_TWEAK_DEG)
+                send_nav_cmd(
+                    f"!TWEAK_R{mag:.1f}",
+                    f"right tweak {mag:.1f} (turn_deg={turn_deg:.1f})",
                     force=True,
                 )
 
@@ -850,12 +854,9 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
     wait=False (default): fire-and-forget (vision nudges 4/6/8/5).
     Returns False if a waited motion timed out or was aborted.
     09/26/26: Added last_speed_increment logic to prevent '8' being sent too often
-    11/07/26: 'print()' changed to 'prompt()' and suppressed unless LOG_LEVEL >= LOG_DEBUG
     """
     global last_nav_cmd_sent, last_nav_cmd_time, last_speed_increment
-    if LOG_LEVEL >= LOG_DEBUG:
-        prompt(f"send_nav_cmd: cmd={cmd}, reason={reason}, force={force}, wait={wait}")
-
+    # (debug print already gated elsewhere)
 
     cmd = (cmd or "").strip()
     if not cmd:
@@ -884,19 +885,30 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
     if wait:
         drain_teensy_events()
 
+    # Commands that end with StopBothMotors() on the Teensy
+    stops_motors = (
+        cmd == "5"
+        or cmd in ("4", "6", "0", "1")
+        or cmd[0] in ("L", "R", "T", "l", "r", "t")
+    )
+
     if cmd == "8":
         log(f"send_nav_cmd: cmd=8, last_speed_increment={last_speed_increment}")
         if last_speed_increment < NAV_MAX_SPEED_INCREMENT:
             last_speed_increment += 1
             log(f"last_speed_increment increased to {last_speed_increment}")
             send_raw(cmd)
-        
+        # else silently dropped — still at max
     elif cmd in ("4", "6"):
         send_raw(cmd)
         log_heading_after_tweak(cmd, reason)
     else:
         send_raw(cmd)
-    
+
+    # Reset speed latch after any command that stops the motors
+    if stops_motors:
+        last_speed_increment = 0
+
     last_nav_cmd_time = time.time()
     last_nav_cmd_sent = cmd
     if LOG_LEVEL >= LOG_INFO:
@@ -909,16 +921,18 @@ def send_nav_cmd(cmd: str, reason: str, *, force: bool = False, wait: bool = Fal
     if done is None:
         log(f"TIMEOUT waiting DONE for {cmd} ({reason})")
         send_raw("5")
+        last_speed_increment = 0          # timeout also stops
         return False
     if "ABORT" in done:
         log(f"ABORTED {cmd}: {done}")
         if "MANUAL" in done or "STOP" in done:
+            last_speed_increment = 0
             return False
-        return NAV_SEQ_CONTINUE_ON_FW_ABORT    
+        return NAV_SEQ_CONTINUE_ON_FW_ABORT
     if LOG_LEVEL >= LOG_INFO:
         log(f"DONE ← {done}")
     return True
-
+    
 def send_nav_seq(steps, reason):
     """Run a recovery sequence. Each non-D step waits for Teensy DONE."""
     global nav_enabled
