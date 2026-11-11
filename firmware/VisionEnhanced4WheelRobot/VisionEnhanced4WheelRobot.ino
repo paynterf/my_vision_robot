@@ -32,6 +32,7 @@ extern "C"
 //#define NO_IRDET //added 04/05/17 for daytime in-atrium testing (too much ambient IR)
 //#define DISTANCES_ONLY //added 11/14/18 to just display distances in infinite loop
 //#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
+//#define NO_OBSTACLE //added 11/10/26 to disable 'OBSTACLE_AHEAD' detection
 //#define BATTERY_DISCHARGE //added 03/04/20 to discharge battery safely
 //#define PID_TUNING_TELEMETRY_ONLY //added 07/22/23 to facilitate PID tuning
 //#define CHG_STATION_PID_TUNING_TEST //added 11/16/23 to document this testing block & then commented out -
@@ -73,6 +74,7 @@ const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 1000; //added 09/25/23
 //const uint16_t TELEMETRY_PRINT_INTERVAL_MSEC = 2000; //10/03/26
 const uint32_t TELEMETRY_HEADER_PRINT_INTERVAL_MSEC = 50 * TELEMETRY_PRINT_INTERVAL_MSEC; //added 09/01/26
 const uint16_t STUCK_AHEAD_PRINT_INTERVAL_MSEC = 1000; //added 11/01/26 to suppress spamming the Pi5
+const uint16_t OBSTACLE_AHEAD_PRINT_INTERVAL_MSEC = 1000; //added 11/10/26 to suppress spamming the Pi5
 
 elapsedMillis MsecSinceLastAdj; //added 05/24/22 for ParallelOrientation() routine
 elapsedMillis MsecSinceLastIRHomingAdj; //01/07/22 used for #ifdef IR_HOMING_ONLY block
@@ -82,7 +84,8 @@ elapsedMillis mSecSinceLastWallTrackUpdate;
 elapsedMillis MsecSinceLastFrontDistUpdate; //10/02/22 slower update rate needed for front LIDAR
 elapsedMillis mSecSinceLastTelemetryUpdate; //09/25/23 added to reduce telemetry printout frequency
 elapsedMillis mSecSinceLastTelemetryHeader; //09/25/23 added to reduce telemetry printout frequency
-elapsedMillis mSecSinceLastStuckAheadPrint; //09/25/23 added to suppress Pi5 spam
+elapsedMillis mSecSinceLastStuckAheadPrint; //11/01/26 added to suppress Pi5 spam
+elapsedMillis mSecSinceLastObstacleAheadPrint; //11/10/26 added to suppress Pi5 spam
 #pragma endregion TIME INTERVALS
 
 //#define IMU_HDG_CORRECTION_FACTOR 0.787401575 //added 10/03/26 this is 1/1.27, where 1.27 was derived from protractor vs IMUHdgDegVal readings
@@ -145,7 +148,7 @@ const float ZENER_VOLTAGE_OFFSET = 5.96; //03/14/22 measured zener voltage
 
 #pragma region DISTANCE_MEASUREMENT_SUPPORT
 //misc LIDAR and Ping sensor parameters
-const uint16_t FRONT_OBSTACLE_DETECTION_DIST_CM = 30; //rev 04/28/17 for better obstacle handling
+const uint16_t OBSTACLE_AHEAD_DETECTION_DIST_CM = 30; //rev 04/28/17 for better obstacle handling
 const uint16_t CHG_STN_AVOIDANCE_DIST_CM = 40; //added 03/11/17 for charge stn avoidance
 const uint16_t MAX_FRONT_DISTANCE_CM = 1000;//03/05/23 Garmin LIDAR-Lite V4/LED can handle up to 10m
 //const uint16_t MAX_LR_DISTANCE_CM = 200;  //04/19/15 now using sep parameters for front and side sensors
@@ -376,7 +379,8 @@ bool RollingTurn(bool b_ccw, bool b_fwd, float numDeg, float Kp, float Ki, float
 //                                  "EXCESS_STEER_VAL", "IR_BEAM_AVAILABLE", "MIRRORED_SURFACE"
 //};//02/08/23 added "OPEN_DOORWAY" 03/13/23 added "TRACKING_WRONG_WALL", 01/22/24 added "MIRRORED_SURFACE"
 
-uint8_t gl_AnomalyCode = ANOMALY_NONE;
+//uint8_t gl_AnomalyCode = ANOMALY_NONE;
+AnomalyCode gl_AnomalyCode = ANOMALY_NONE;
 
 #pragma endregion ENUMS
 
@@ -799,6 +803,11 @@ void loop()
 
   UpdateAllEnvironmentParameters(); //added 10/13/26
 
+  if (gl_AnomalyCode == AnomalyCode::ANOMALY_OBSTACLE_AHEAD)
+  {
+    StopBothMotors();
+    gl_pSerPort->printf("!ANOMALY_OBSTACLE_AHEAD");//send status to Pi5
+  }
 
 #ifndef NO_STUCK
   if (IsStuckAhead() &&
@@ -809,6 +818,16 @@ void loop()
     gl_pSerPort->printf("%lu: !Stuck_Ahead\n", millis());
   }
 #endif // NO_STUCK
+
+#ifndef NO_OBSTACLE
+  if (gl_FrontCm <= OBSTACLE_AHEAD_DETECTION_DIST_CM &&
+    gl_AnomalyCode == AnomalyCode::ANOMALY_NONE &&
+    mSecSinceLastObstacleAheadPrint >= OBSTACLE_AHEAD_PRINT_INTERVAL_MSEC)
+  {
+    mSecSinceLastObstacleAheadPrint = 0;
+    gl_pSerPort->printf("%lu: !Obstacle_Ahead\n", millis());
+  }
+#endif // NO_OBSTACLE
 
   //delay(200); //08/17/23 put in to make sure distances are current
   delay(MSEC_PER_DIST_UPDATE); //08/17/23 put in to make sure distances are current
@@ -3044,29 +3063,45 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     gl_pSerPort->printf(F("%lu: 'In '!' case with buff = %s with length %d\n"), millis(), buff, bufflen);
 
     // !STUCK_ACK  (optional but recommended – stops alerts before the scan)
-    if (strcmp(buff, "!STUCK_ACK") == 0)
+    if (strcmp(buff, "!STUCK_AHEAD_ACK") == 0)
     {
       gl_AnomalyCode = AnomalyCode::ANOMALY_STUCK_AHEAD;
-      gl_pSerPort->printf(F("%lu: DONE !STUCK_ACK\n"), millis());
+      gl_pSerPort->printf(F("%lu: DONE !STUCK_AHEAD_ACK\n"), millis());
     }
 
-    if (strcmp(buff, "!STUCK_SCAN") == 0)
+    if (strcmp(buff, "!STUCK_AHEAD_SCAN") == 0)
     {
-      gl_pSerPort->printf(F("%lu: 'stuck scan' request received\n"), millis());
-      StopBothMotors();
-      gl_AnomalyCode = AnomalyCode::ANOMALY_STUCK_AHEAD;
-      RunToDaylightV2();
-      InitFrontDistArray();
-      gl_pSerPort->printf(F("%lu: !SCAN_COMPLETE\n"), millis());
-      // do not clear here
+      StuckOrObstacleRecovery(AnomalyCode::ANOMALY_STUCK_AHEAD); //11/10/26 new helper function
     }
 
-    if (strcmp(buff, "!STUCK_CLEAR") == 0)
+    if (strcmp(buff, "!STUCK_AHEAD_CLEAR") == 0)
     {
       gl_AnomalyCode = AnomalyCode::ANOMALY_NONE;
       InitFrontDistArray();
-      gl_pSerPort->printf(F("%lu: DONE !STUCK_CLEAR\n"), millis());
+      gl_pSerPort->printf(F("%lu: DONE !STUCK_AHEAD_CLEAR\n"), millis());
     }
+
+    //11/10/26 added to handle ANOMALY_OBSTACLE_AHEAD case
+    if (strcmp(buff, "!OBSTACLE_AHEAD_ACK") == 0)
+    {
+      gl_AnomalyCode = AnomalyCode::ANOMALY_OBSTACLE_AHEAD;
+      gl_pSerPort->printf(F("%lu: DONE !OBSTACLE_AHEAD_ACK\n"), millis());
+    }
+
+    if (strcmp(buff, "!OBSTACLE_AHEAD_SCAN") == 0)
+    {
+      StuckOrObstacleRecovery(AnomalyCode::ANOMALY_OBSTACLE_AHEAD); //11/10/26 new helper function
+    }
+
+    if (strcmp(buff, "!OBSTACLE_AHEAD_CLEAR") == 0)
+    {
+      gl_AnomalyCode = AnomalyCode::ANOMALY_NONE;
+      InitFrontDistArray();
+      gl_pSerPort->printf(F("%lu: DONE !OBSTACLE_AHEAD_CLEAR\n"), millis());
+    }
+
+    //11/10/26: the plan for 'obstacle_ahead' is to use the exact same 
+    //rotary scan as used for 'stuck_ahead'
 
     if (strcmp(buff, "!TEENSY_TIME") == 0) //10/29/26 bugfix
     {
@@ -4326,16 +4361,11 @@ void UpdateAllEnvironmentParameters()
   //gl_pSerPort->printf("%d\t%2.1f\t%2.1f\t%2.1f\n", gl_FrontCm, gl_RearCm, gl_LeftCenterCm, gl_RightCenterCm);
 
   ////Step2: Update all distance arrays
-  // 05/19/22 no longer using incremental calcs, so no need for oldestfront/reardistval
-  //UpdateFrontDistanceArray(gl_FrontCm);
   gl_FrontCm = GetFrontDistCm();
   UpdateFrontDistanceArray(gl_FrontCm);
 
-  //Step3: Update both front and rear variance calcs
-  //gl_Frontvar = CalcBruteFrontDistArrayVariance();//05/19/22 bugfix
+//Step3: Update both front and rear variance calcs
   gl_Frontvar = CalcBruteFrontDistArrayVariance();//05/19/22 bugfix
-
-  //gl_pSerPort->printf("%lu: Bottom of UpdateAllEnvironmentParameters(%s) with anomaly code = %s\n", millis(), WallTrackStrArray[trkdir], AnomalyStrArray[gl_LastAnomalyCode]);
 }
 
 void SendTelemetry()
@@ -4381,8 +4411,19 @@ void trim_trailing(char* s)
 }
 #pragma endregion MISCELLANEOUS
 
-//10/14/26 copied from WallE3_Git.ino for 'Find Best Direction' problem
 #pragma region RUN_TO_DAYLIGHT
+//11/10/26 new helper function to handle 'stuck' or 'obstacle' recovery
+void StuckOrObstacleRecovery(AnomalyCode anomaly_code)
+{
+  gl_pSerPort->printf(F("%lu: '360-deg scan' request received for %s\n"), millis(), AnomalyStrArray[anomaly_code]);
+  StopBothMotors();
+  gl_AnomalyCode = anomaly_code;
+  RunToDaylightV2();
+  InitFrontDistArray();
+  gl_pSerPort->printf(F("%lu: !%s_DONE\n"), millis(), AnomalyStrArray[anomaly_code]);
+}
+
+//10/14/26 copied from WallE3_Git.ino for 'Find Best Direction' problem
 void RunToDaylightV2()
 {
   //Purpose: Look around for a clear direction to move.
