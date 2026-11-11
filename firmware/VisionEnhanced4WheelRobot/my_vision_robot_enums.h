@@ -18,7 +18,8 @@ enum AnomalyCode
   ANOMALY_CHARGER_CONNECTED, //added 05/22/22
   ANOMALY_EXCESS_STEER_VAL, //added 05/19/23
   ANOMALY_IR_BEAM_AVAILABLE, //added 08/20/23
-  ANOMALY_MANUAL_CONTROL //added 11/02/26 
+  ANOMALY_MANUAL_CONTROL, //added 11/02/26 
+  ANOMALY_OBSTACLE_AHEAD_ACK //added 11/11/26
 };
 
 //08/23/23 unused names removed
@@ -26,7 +27,8 @@ enum AnomalyCode
 const char* AnomalyStrArray[] = { "NONE", "STUCK_AHEAD", "STUCK_BEHIND", "OBSTACLE_AHEAD",
                                   "WALL_OFFSET_DIST_AHEAD","OBSTACLE_BEHIND",
                                   "DEAD_BATTERY", "CHARGER_CONNECTED",
-                                  "EXCESS_STEER_VAL", "IR_BEAM_AVAILABLE", "MANUAL_CONTROL"
+                                  "EXCESS_STEER_VAL", "IR_BEAM_AVAILABLE", "MANUAL_CONTROL",
+                                  "OBSTACLE_AHEAD_ACK"
                                 };//02/08/23 added "OPEN_DOORWAY" 03/13/23 added "TRACKING_WRONG_WALL", 01/22/24 added "MIRRORED_SURFACE"
 
 enum WallTrackingCases

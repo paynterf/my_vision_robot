@@ -31,7 +31,7 @@ extern "C"
 //#define NO_VL53L1X //09/02/26 now only used for rear VL53L1X sensor
 //#define NO_IRDET //added 04/05/17 for daytime in-atrium testing (too much ambient IR)
 //#define DISTANCES_ONLY //added 11/14/18 to just display distances in infinite loop
-//#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
+#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
 //#define NO_OBSTACLE //added 11/10/26 to disable 'OBSTACLE_AHEAD' detection
 //#define BATTERY_DISCHARGE //added 03/04/20 to discharge battery safely
 //#define PID_TUNING_TELEMETRY_ONLY //added 07/22/23 to facilitate PID tuning
@@ -805,8 +805,8 @@ void loop()
 
   if (gl_AnomalyCode == AnomalyCode::ANOMALY_OBSTACLE_AHEAD)
   {
-    StopBothMotors();
-    gl_pSerPort->printf("!ANOMALY_OBSTACLE_AHEAD");//send status to Pi5
+    //StopBothMotors();
+    gl_pSerPort->printf("!ANOMALY_OBSTACLE_AHEAD\n");//send status to Pi5
   }
 
 #ifndef NO_STUCK
@@ -2588,7 +2588,8 @@ bool CheckForUserInput()
   //  11/04/23 chg to bool ret value so can use to exit calling while() loop if necessary
   //  08/07/26 rev to check for input on any serial port
 
-  const int bufflen = 20; //10/22/26 rev to handle full-string commands, i.e. 'STUCK_SCAN'
+  //const int bufflen = 20; //10/22/26 rev to handle full-string commands, i.e. 'STUCK_SCAN'
+  const int bufflen = 50; //11/11/26 rev to handle "!OBSTACLE_AHEAD_SCAN"
   char buff[bufflen];
   memset(buff, 0, bufflen);
   //*byte incomingByte = 0; //moved here 11/21/21
@@ -4443,7 +4444,7 @@ void RunToDaylightV2()
   //Notes:
   //  10/22/26 added line to check for user input between steps
 
-  gl_pSerPort->printf("!SCAN_START\n"); //tell Pi5 that the scan is starting
+  gl_pSerPort->printf("!STUCK_AHEAD_SCAN_START\n"); //tell Pi5 that the scan is starting
 
   //Step1: rotate 360deg in 10deg steps, filling arrays with the corresponding values
   for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
@@ -4489,7 +4490,7 @@ void RunToDaylightV2()
     }
   }
 
-  gl_pSerPort->printf("!SCAN_END\n");
+  gl_pSerPort->printf("!STUCK_AHEAD_SCAN_END\n");
   gl_pSerPort->printf("There are %d lines with FrontD > MIN_RUN_TO_DAYLIGHT_DIST_CM\n", numfar);
 
 }
