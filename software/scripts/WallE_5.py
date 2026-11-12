@@ -703,10 +703,19 @@ def enter_manual_mode(reason: str = "manual override"):
 
 def enter_auto_mode(reason: str = "auto"):
     """WallE AUTO only. Teensy must already be in the command menu."""
+    log(f"Entering AUTO mode – {reason}: obstacle_ahead_event={obstacle_ahead_event.is_set()}")
     global nav_enabled, last_nav_cmd_sent, last_speed_increment
     nav_enabled = True
     last_nav_cmd_sent = None
     send_raw("!RESET_FRONT_ARRAY") #reset front array to clear any stuck readings
+
+    #11/11/26 added to check for anomalies before entering AUTO mode
+    if obstacle_ahead_event.is_set():
+        perform_obstacle_recovery("obstacle_ahead")
+        obstacle_ahead_event.clear()
+        return
+
+    #normal startup sequence
     last_speed_increment = 1 #only one 'speedup' allowed
     send_raw("/") #make sure robot is in forward mode when entering AUTO mode
     send_raw("8") #make sure robot is moving forward when entering AUTO mode
@@ -1080,6 +1089,63 @@ def drain_scan_queue():
         except queue.Empty:
             break
 
+#11/11/26 added to perform obstacle recovery if obstacle_ahead_event is set        
+def perform_obstacle_recovery(active_anomaly: str = "obstacle_ahead"):
+    """
+    Full obstacle-ahead recovery:
+    stop → short reverse → scan → turn to best heading → clear state → resume forward.
+    Blocking until the sequence finishes or times out.
+    """
+    global recovery_in_progress, nav_enabled, last_speed_increment #11/12/26 bugfix
+
+    anomaly = active_anomaly.upper()          # e.g. "OBSTACLE_AHEAD"
+    log(f"{anomaly} recovery starting")
+
+    # 1. Stop and prepare
+    send_nav_seq([
+        ("5", "stop"),
+        ("!RESET_FRONT_ARRAY", "reset front array"),
+        ("!REVERSE", "reverse"),
+        ("8", "speed up"),
+        ("D1", "delay 1s"),
+        ("5", "stop"),
+    ], "pre-scan backup")
+
+    send_nav_cmd(f"!{anomaly}_SCAN", "start Teensy scan", force=True, wait=False)
+    if not scan_ready.wait(timeout=45):
+        log("scan timed out")
+    else:
+        scan_ready.clear()
+        rows = scan_queue.get()
+        best_hdg = get_stuck_ahead_recovery_heading(rows)
+        log(f"Recovery heading: {best_hdg:.1f}°")
+
+        send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading",
+                    force=True, wait=True)
+        last_speed_increment = 0
+
+        send_nav_seq([
+            ("5", "stop"),
+            (f"!{anomaly}_CLEAR", f"clear {anomaly} state"),
+            ("!RESET_FRONT_ARRAY", "reset front array"),
+            ("!FORWARD", "forward"),
+            ("8", "speed up")
+        ], "restart navigation")
+                    
+    # Clear whichever event we just handled, plus any that arrived during the scan/turn
+    # if active_anomaly == "obstacle_ahead":
+    #     obstacle_ahead_event.clear()
+    # elif active_anomaly == "stuck_ahead":
+    #     stuck_ahead_event.clear()  
+
+    #11/12/26 bugfix: clear both events to avoid race conditions
+    obstacle_ahead_event.clear()
+    stuck_ahead_event.clear()
+
+    recovery_in_progress = False
+    nav_enabled = True
+    log(f"{anomaly} recovery complete — resuming nav")
+    return True
 # ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
@@ -1168,94 +1234,25 @@ def main():
                 if LOG_LEVEL >= LOG_DEBUG:
                     log("STUCK_AHEAD ignored (recovery in progress or nav disabled)")
             else:
-                send_raw("!STUCK_AHEAD_ACK")  # Teensy ACK to clear the Stuck_Ahead
-                recovery_in_progress = True
-                nav_enabled = False
-                log("Stuck ahead detected — starting recovery")
-                last_speed_increment = 0
-
-                send_nav_seq([
-                    ("5", "stop"),
-                    ("!RESET_FRONT_ARRAY", "reset front array"),
-                    ("!REVERSE", "reverse"),
-                    ("8", "speed up"),
-                    ("D1", "delay 1s"),
-                    ("5", "stop"),
-                ], "pre-scan backup")
-
-                send_nav_cmd("!STUCK_AHEAD_SCAN", "start Teensy scan", force=True, wait=False)
-                if not scan_ready.wait(timeout=45):
-                    log("scan timed out")
-                else:
-                    scan_ready.clear()
-                    rows = scan_queue.get()
-                    best_hdg = get_stuck_ahead_recovery_heading(rows)
-                    log(f"Recovery heading: {best_hdg:.1f}°")
-
-                    send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading",
-                                force=True, wait=True)
-                    last_speed_increment = 0
- 
-                    send_nav_seq([
-                        ("5", "stop"),
-                        ("!STUCK_AHEAD_CLEAR", "clear stuck state"),
-                        ("!RESET_FRONT_ARRAY", "reset front array"),
-                        ("!FORWARD", "forward"),
-                        ("8", "speed up")
-                    ], "restart navigation")
-                    
+                perform_obstacle_recovery("stuck_ahead")   
+                                 
                 # drop any !Stuck_Ahead that arrived during the scan/turn
                 stuck_ahead_event.clear()
                 recovery_in_progress = False
                 nav_enabled = True
 
         if obstacle_ahead_event.is_set():
-            obstacle_ahead_event.clear()
+            #obstacle_ahead_event.clear()
             if recovery_in_progress or not nav_enabled:
                 if LOG_LEVEL >= LOG_DEBUG:
                     log("OBSTACLE_AHEAD ignored (recovery in progress or nav disabled)")
             else:
-                send_raw("!OBSTACLE_AHEAD_ACK")  # Teensy ACK to clear the Obstacle_Ahead
-                recovery_in_progress = True
-                nav_enabled = False
-                log("Obstacle ahead detected — starting recovery")
-                last_speed_increment = 0
-
-                send_nav_seq([
-                    ("5", "stop"),
-                    ("!RESET_FRONT_ARRAY", "reset front array"),
-                    ("!REVERSE", "reverse"),
-                    ("8", "speed up"),
-                    ("D1", "delay 1s"),
-                    ("5", "stop"),
-                ], "pre-scan backup")
-
-                send_nav_cmd("!OBSTACLE_AHEAD_SCAN", "start Teensy scan", force=True, wait=False)
-                if not scan_ready.wait(timeout=45):
-                    log("scan timed out")
-                else:
-                    scan_ready.clear()
-                    rows = scan_queue.get()
-                    best_hdg = get_stuck_ahead_recovery_heading(rows)
-                    log(f"Recovery heading: {best_hdg:.1f}°")
-
-                    send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading",
-                                force=True, wait=True)
-                    last_speed_increment = 0
- 
-                    send_nav_seq([
-                        ("5", "stop"),
-                        ("!OBSTACLE_AHEAD_CLEAR", "clear obstacle state"),
-                        ("!RESET_FRONT_ARRAY", "reset front array"),
-                        ("!FORWARD", "forward"),
-                        ("8", "speed up")
-                    ], "restart navigation")
+                perform_obstacle_recovery("obstacle_ahead")
                     
                 # drop any !Obstacle_Ahead that arrived during the scan/turn
                 obstacle_ahead_event.clear()
                 recovery_in_progress = False
                 nav_enabled = True
-
 
         if user is None:
             continue
