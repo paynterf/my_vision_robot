@@ -171,6 +171,7 @@ def send_raw(cmd: str):
     """Send a raw string + newline to the Teensy."""
     if ser and ser.is_open:
         ser.write((cmd.strip() + "\n").encode())
+        ser.flush()
         if LOG_LEVEL >= LOG_VERBOSE:
             log(f"TX → {cmd.strip()}")
         
@@ -253,13 +254,14 @@ def telemetry_loop():
                                 pass
 
                         #10/24/26 Added to collect scan data for '!STUCK_AHEAD' detection
-                        if "!STUCK_AHEAD_SCAN_START" in body:
-                            drain_scan_queue()                  # clear any old scan data
+                        # Collect scan data for any anomaly recovery scan
+                        if "_SCAN_START" in body:
+                            drain_scan_queue()
                             scan_rows = []
                             collecting = True
-                        elif collecting and "!STUCK_AHEAD_SCAN_END" in body:
+                        elif collecting and "_SCAN_END" in body:
                             collecting = False
-                            scan_queue.put(scan_rows)       # hand the whole table over
+                            scan_queue.put(scan_rows)
                             scan_ready.set()
                         elif collecting:
                             # parse a data line into (msec, dist, hdg) and append
@@ -268,7 +270,7 @@ def telemetry_loop():
                                 try:
                                     scan_rows.append((int(parts[0]), float(parts[1]), float(parts[2])))
                                 except ValueError:
-                                    pass                       
+                                    pass
                 except Exception as e:
                     print(f"[telemetry] {e}")
             time.sleep(0.02)# ----------------------------------------------------------------------
@@ -698,6 +700,8 @@ def enter_manual_mode(reason: str = "manual override"):
     last_nav_cmd_sent = None
     last_speed_increment = 0
     send_raw("5")
+    time.sleep(0.05)   # give the Teensy a moment to see it
+    send_raw("5")      # second stop catches a mid-turn case
     log(f"MANUAL mode – {reason}")
     prompt(f"MANUAL mode – {reason}")
 
