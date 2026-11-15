@@ -804,11 +804,12 @@ void loop()
 
   UpdateAllEnvironmentParameters(); //added 10/13/26
 
-  if (gl_AnomalyCode == AnomalyCode::ANOMALY_OBSTACLE_AHEAD)
-  {
-    //StopBothMotors();
-    gl_pSerPort->printf("!ANOMALY_OBSTACLE_AHEAD\n");//send status to Pi5
-  }
+  //11/15/26 - dead code commented out
+  //if (gl_AnomalyCode == AnomalyCode::ANOMALY_OBSTACLE_AHEAD)
+  //{
+  //  //StopBothMotors();
+  //  gl_pSerPort->printf("!ANOMALY_OBSTACLE_AHEAD\n");//send status to Pi5
+  //}
 
 #ifndef NO_STUCK
   if (IsStuckAhead() &&
@@ -821,7 +822,7 @@ void loop()
 #endif // NO_STUCK
 
 #ifndef NO_OBSTACLE
-  if (gl_FrontCm <= OBSTACLE_AHEAD_DETECTION_DIST_CM &&
+  if (IsObstacleAhead() && 
     gl_AnomalyCode == AnomalyCode::ANOMALY_NONE &&
     mSecSinceLastObstacleAheadPrint >= OBSTACLE_AHEAD_PRINT_INTERVAL_MSEC)
   {
@@ -3147,7 +3148,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       // SpinTurn now has the new defaulted argument
       SpinTurn(left, deg, DEFAULT_TURN_RATE_DEGPERSEC, false);
 
-      Serial.println("DONE !TWEAK");
+      Serial1.println("DONE !TWEAK");
       return true;
     }
 
@@ -3412,8 +3413,8 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec, bool stopAtEnd) //11/07
 
       if (bDoneTurning)
       {
-        gl_pSerPort->printf("%lu: Completed turn in %lu mSec with hdg = %3.2f, tgt = %3.2f, and match = %1.3f\n", 
-          millis(), millis() - StartMilliSec, IMUHdgValDeg, tgt_deg, curHdgMatchVal);
+        //gl_pSerPort->printf("%lu: Completed turn in %lu mSec with hdg = %3.2f, tgt = %3.2f, and match = %1.3f\n", 
+        //  millis(), millis() - StartMilliSec, IMUHdgValDeg, tgt_deg, curHdgMatchVal);
 
         bResult = true;
         break;
@@ -4325,6 +4326,19 @@ bool IsStuckAhead()
   //  !IsLeftMotorForward() && !IsRightMotorForward();
   return (gl_Frontvar < STUCK_FRONT_VARIANCE_THRESHOLD)
     && (gl_FrontCm < MAX_REAR_DISTANCE_CM);
+}
+
+bool IsObstacleAhead()
+{
+  //Purpose:  Determine if there is an obstacle ahead
+  //Inputs:
+  //  gl_FrontCm  = float denoting current front LIDAR distance (cm)
+  //  OBSTACLE_AHEAD_DETECTION_DIST_CM = uint16_t obstacle ahead threshold (cm)
+  //Notes:
+    //11/15/26 added for ANOMALY_OBSTACLE_AHEAD support
+
+  //gl_pSerPort->printf("IsObstacleAhead() with FrontD = %d\n",//  gl_FrontCm);
+  return (gl_FrontCm <= OBSTACLE_AHEAD_DETECTION_DIST_CM);
 }
 
 void UpdateAllEnvironmentParameters()
