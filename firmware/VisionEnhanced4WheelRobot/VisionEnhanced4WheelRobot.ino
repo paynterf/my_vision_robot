@@ -420,9 +420,10 @@ float gl_PID_Outval;
 //added 09/09/23 for 'choose better side' support
 float gl_AvgHeadingDeg;
 
-//added 10/08/23 for QuickSort()
-//const uint16_t RUN_TO_DAYLIGHT_ARRAY_SIZE = 36;
-const uint16_t RUN_TO_DAYLIGHT_ARRAY_SIZE = 72;
+//const uint16_t RUN_TO_DAYLIGHT_ARRAY_SIZE = 72;
+//11/12/26 chg array size to 68 vs 72.  Avg turn is 5.27777777 deg, times 68 = 358.889 deg
+const uint16_t RUN_TO_DAYLIGHT_ARRAY_SIZE = 68;
+const float RUN_TO_DAYLIGHT_STEP_DEG = 5.0;
 float FrontD[RUN_TO_DAYLIGHT_ARRAY_SIZE];
 float Hdg[RUN_TO_DAYLIGHT_ARRAY_SIZE];
 ulong Msec[RUN_TO_DAYLIGHT_ARRAY_SIZE];
@@ -2669,7 +2670,8 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   //buff[0] = in_char;
   //gl_pSerPort->printf("CheckForUserInput(char %c)\n", in_char);
 
-  gl_pSerPort->printf("CheckForUserInput(%s)\n", buff);
+  //gl_pSerPort->printf("CheckForUserInput(%s)\n", buff);
+  gl_pSerPort->printf("%lu: CheckForUserInput(%s)\n", millis(), buff);
 
   gl_pSerPort->printf("top of switch: buff[0] = %c\n", buff[0]);
   //switch (in_char)
@@ -3063,12 +3065,13 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
     int bufflen = strlen(buff);
     gl_pSerPort->printf(F("%lu: 'In '!' case with buff = %s with length %d\n"), millis(), buff, bufflen);
 
-    // !STUCK_ACK  (optional but recommended – stops alerts before the scan)
-    if (strcmp(buff, "!STUCK_AHEAD_ACK") == 0)
-    {
-      gl_AnomalyCode = AnomalyCode::ANOMALY_STUCK_AHEAD;
-      gl_pSerPort->printf(F("%lu: DONE !STUCK_AHEAD_ACK\n"), millis());
-    }
+    //11/13/26 commented out.  gl_AnomalyCode now set in StuckOrObstacleRecovery()
+    //// !STUCK_ACK  (optional but recommended – stops alerts before the scan)
+    //if (strcmp(buff, "!STUCK_AHEAD_ACK") == 0)
+    //{
+    //  gl_AnomalyCode = AnomalyCode::ANOMALY_STUCK_AHEAD;
+    //  gl_pSerPort->printf(F("%lu: DONE !STUCK_AHEAD_ACK\n"), millis());
+    //}
 
     if (strcmp(buff, "!STUCK_AHEAD_SCAN") == 0)
     {
@@ -3082,12 +3085,13 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       gl_pSerPort->printf(F("%lu: DONE !STUCK_AHEAD_CLEAR\n"), millis());
     }
 
-    //11/10/26 added to handle ANOMALY_OBSTACLE_AHEAD case
-    if (strcmp(buff, "!OBSTACLE_AHEAD_ACK") == 0)
-    {
-      gl_AnomalyCode = AnomalyCode::ANOMALY_OBSTACLE_AHEAD;
-      gl_pSerPort->printf(F("%lu: DONE !OBSTACLE_AHEAD_ACK\n"), millis());
-    }
+    //11/13/26 commented out.  gl_AnomalyCode now set in StuckOrObstacleRecovery()
+    ////11/10/26 added to handle ANOMALY_OBSTACLE_AHEAD case
+    //if (strcmp(buff, "!OBSTACLE_AHEAD_ACK") == 0)
+    //{
+    //  gl_AnomalyCode = AnomalyCode::ANOMALY_OBSTACLE_AHEAD;
+    //  gl_pSerPort->printf(F("%lu: DONE !OBSTACLE_AHEAD_ACK\n"), millis());
+    //}
 
     if (strcmp(buff, "!OBSTACLE_AHEAD_SCAN") == 0)
     {
@@ -3157,7 +3161,7 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
   } // end outer switch
 
 
-  gl_pSerPort->printf(F("At exit from CheckForUserInput(), retval = %s\n"), retval? "TRUE": "FALSE");
+  gl_pSerPort->printf(F("%lu: At exit from CheckForUserInput(), retval = %s\n"), millis(), retval? "TRUE": "FALSE");
   return retval;
 }
 #pragma endregion OTA & DIRECT MOTOR CONTROL
@@ -3292,7 +3296,7 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec, bool stopAtEnd) //11/07
   float avgrate = 0;
   uint16_t numrates = 0;
   gl_bCFUI_Abort = false; //09/22/26 added to prevent SpinTurn() run-on after '5' sent to CheckForUserInput()
-
+  uint32_t StartMilliSec = millis(); //added 11/14/26 for debugging 
   while (!bDoneTurning && !bTimedOut && !gl_bCFUI_Abort)//rev 09/22/26 to add gl_bCFUI_Abort
   {
     //11/06/20 now just loops between PID calcs
@@ -3398,7 +3402,8 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec, bool stopAtEnd) //11/07
       {
         //DEBUG!!
         UpdateIMUHdgValDeg(); //09/13/26 added to make sure IMUHdgValDeg printout value is valid
-        gl_pSerPort->printf("timed out with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
+        gl_pSerPort->printf("%lu: timed out after %lu mSec with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n", 
+          millis(), millis()- StartMilliSec, IMUHdgValDeg, tgt_deg, curHdgMatchVal);
         //DEBUG!!
 
         bResult = false;
@@ -3407,7 +3412,8 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec, bool stopAtEnd) //11/07
 
       if (bDoneTurning)
       {
-        //gl_pSerPort->printf("Completed turn with hdg = %3.2f, tgt = %3.2f, and match = %1.3f\n", IMUHdgValDeg, tgt_deg, curHdgMatchVal);
+        gl_pSerPort->printf("%lu: Completed turn in %lu mSec with hdg = %3.2f, tgt = %3.2f, and match = %1.3f\n", 
+          millis(), millis() - StartMilliSec, IMUHdgValDeg, tgt_deg, curHdgMatchVal);
 
         bResult = true;
         break;
@@ -4419,13 +4425,13 @@ void StuckOrObstacleRecovery(AnomalyCode anomaly_code)
   gl_pSerPort->printf(F("%lu: '360-deg scan' request received for %s\n"), millis(), AnomalyStrArray[anomaly_code]);
   StopBothMotors();
   gl_AnomalyCode = anomaly_code;
-  RunToDaylightV2();
+  RunToDaylightV2(AnomalyStrArray[anomaly_code]);
   InitFrontDistArray();
   gl_pSerPort->printf(F("%lu: !%s_DONE\n"), millis(), AnomalyStrArray[anomaly_code]);
 }
 
 //10/14/26 copied from WallE3_Git.ino for 'Find Best Direction' problem
-void RunToDaylightV2()
+void RunToDaylightV2(const char* anomalystr)
 {
   //Purpose: Look around for a clear direction to move.
   //Inputs:
@@ -4444,17 +4450,13 @@ void RunToDaylightV2()
   //Notes:
   //  10/22/26 added line to check for user input between steps
 
-  gl_pSerPort->printf("!STUCK_AHEAD_SCAN_START\n"); //tell Pi5 that the scan is starting
+  gl_pSerPort->printf("!%s_SCAN_START\n", anomalystr); //tell Pi5 that the scan is starting
 
   //Step1: rotate 360deg in 10deg steps, filling arrays with the corresponding values
   for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
   {
-    //10/23/26 added to abort scan on user 'C' input
-    if (gl_AnomalyCode == AnomalyCode::ANOMALY_MANUAL_CONTROL)
-    {
-      gl_pSerPort->printf("%lu: RunToDaylightV2(): gl_AnomalyCode = AnomalyCode::ANOMALY_MANUAL_CONTROL -> Scan Aborted\n", millis());
-      return;
-    }
+    //10/23/26 added to abort scan on user 'M' input
+    CheckForUserInput();
 
     //get current environmental variables
     UpdateAllEnvironmentParameters();
@@ -4463,7 +4465,9 @@ void RunToDaylightV2()
     FrontD[i] = gl_FrontCm;
     Msec[i] = millis();
 
-    SpinTurn(true, 360/ RUN_TO_DAYLIGHT_ARRAY_SIZE);
+    //11/13/26 bugfix. now array_size and step_deg are independent
+    //SpinTurn(true, 360/ RUN_TO_DAYLIGHT_ARRAY_SIZE);
+    SpinTurn(true, RUN_TO_DAYLIGHT_STEP_DEG);
   }
 
 //DEBUG!!
@@ -4477,22 +4481,22 @@ void RunToDaylightV2()
     delay(50);
   }
 
-  //find out how many lines there are with FrontD > 1.5m
-  gl_pSerPort->printf("Msec\tFrontD\tHdg\n");
-  uint8_t numfar = 0;
+  ////find out how many lines there are with FrontD > 1.5m
+  //gl_pSerPort->printf("Msec\tFrontD\tHdg\n");
+  //uint8_t numfar = 0;
 
-  for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
-  {
-    if (FrontD[i] >= MIN_RUN_TO_DAYLIGHT_DIST_CM)
-    {
-      gl_pSerPort->printf("%lu\t%2.1f\t % 2.1f\n", Msec[i], FrontD[i], Hdg[i]);
-      numfar++;
-    }
-  }
+  //for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
+  //{
+  //  if (FrontD[i] >= MIN_RUN_TO_DAYLIGHT_DIST_CM)
+  //  {
+  //    gl_pSerPort->printf("%lu\t%2.1f\t % 2.1f\n", Msec[i], FrontD[i], Hdg[i]);
+  //    numfar++;
+  //  }
+  //}
 
-  gl_pSerPort->printf("!STUCK_AHEAD_SCAN_END\n");
-  gl_pSerPort->printf("There are %d lines with FrontD > MIN_RUN_TO_DAYLIGHT_DIST_CM\n", numfar);
-
+  //gl_pSerPort->printf("!STUCK_AHEAD_SCAN_END\n");
+  gl_pSerPort->printf("!%s_SCAN_END\n", anomalystr);
+  //gl_pSerPort->printf("There are %d lines with FrontD > MIN_RUN_TO_DAYLIGHT_DIST_CM\n", numfar);
 }
 
 //added 10/14/26. For now it just calls GetFrontDistCm().  Can add rear distance later
