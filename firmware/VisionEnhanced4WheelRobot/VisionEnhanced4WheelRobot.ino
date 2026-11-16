@@ -620,6 +620,9 @@ void setup()
   pinMode(InA_Right, OUTPUT);
   pinMode(InB_Right, OUTPUT);
   pinMode(Spd_Right, OUTPUT);
+
+  StopBothMotors(); //11/16/26 added to suppress unwanted movement on Pi5 startup
+
 #pragma endregion Motor_Pins
 
 #pragma endregion PIN INITIALIZATION
@@ -769,8 +772,6 @@ void setup()
   gl_pSerPort->println(LoopTelemHdrStr);
 #endif
 
-  //RunToDaylightV2();
-  //while (1);
 }
 
 void loop()
