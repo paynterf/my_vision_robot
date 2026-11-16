@@ -31,7 +31,7 @@ extern "C"
 //#define NO_VL53L1X //09/02/26 now only used for rear VL53L1X sensor
 //#define NO_IRDET //added 04/05/17 for daytime in-atrium testing (too much ambient IR)
 //#define DISTANCES_ONLY //added 11/14/18 to just display distances in infinite loop
-#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
+//#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
 //#define NO_OBSTACLE //added 11/10/26 to disable 'OBSTACLE_AHEAD' detection
 //#define BATTERY_DISCHARGE //added 03/04/20 to discharge battery safely
 //#define PID_TUNING_TELEMETRY_ONLY //added 07/22/23 to facilitate PID tuning
