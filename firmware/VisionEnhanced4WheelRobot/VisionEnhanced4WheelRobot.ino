@@ -31,13 +31,13 @@ extern "C"
 //#define NO_VL53L1X //09/02/26 now only used for rear VL53L1X sensor
 //#define NO_IRDET //added 04/05/17 for daytime in-atrium testing (too much ambient IR)
 //#define DISTANCES_ONLY //added 11/14/18 to just display distances in infinite loop
-#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
-#define NO_OBSTACLE //added 11/10/26 to disable 'OBSTACLE_AHEAD' detection
+//#define NO_STUCK //added 03/10/19 to disable 'stuck' detection
+//#define NO_OBSTACLE //added 11/10/26 to disable 'OBSTACLE_AHEAD' detection
 //#define BATTERY_DISCHARGE //added 03/04/20 to discharge battery safely
 //#define PID_TUNING_TELEMETRY_ONLY //added 07/22/23 to facilitate PID tuning
 //#define CHG_STATION_PID_TUNING_TEST //added 11/16/23 to document this testing block & then commented out -
 //#define FRONTBACKMOTION_TESTING_ONLY //added 11/16/23
-#define NO_TELEMETRY //added 09/24/26
+//#define NO_TELEMETRY //added 09/24/26
 
 #define __FILENAME__ (strrchr(__FILE__, '\\') ? strrchr(__FILE__, '\\') + 1 : __FILE__) //added 01/26/23 to extract pgm filename from full path
 #pragma endregion DEFINES
@@ -352,9 +352,6 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec = DEFAULT_TURN_RATE_DEGP
 void RunBothMotorsMsec(bool bisFwd, int timeMsec = 500, uint16_t leftspeednum = MOTOR_SPEED_HALF, uint16_t rightspeednum = MOTOR_SPEED_HALF);
 bool RollingTurn(bool b_ccw, bool b_fwd, float numDeg, float Kp, float Ki, float Kd, float degPersec = DEFAULT_TURN_RATE_DEGPERSEC);
 //bool IsChargerConnected(bool curState = false);
-
-//11/18/26 added for full 360-deg Dist/Hdg scans w/o stopping
-bool FullDistHdgScan(bool b_ccw, float numDeg = 5.0f, float degPersec = DEFAULT_TURN_RATE_DEGPERSEC, bool stopAtEnd = true);
 
 #pragma endregion HEADING_AND_RATE_BASED_TURN_PARAMETERS
 
@@ -774,9 +771,6 @@ void setup()
 #ifndef NO_TELEMETRY
   gl_pSerPort->println(LoopTelemHdrStr);
 #endif
-
-  //FullDistHdgScan(true, 10, 45, false);
-
 
 }
 
@@ -3086,12 +3080,6 @@ bool CheckForUserInput(char* buff) //09/25/26 rev to pass entire input string
       StuckOrObstacleRecovery(AnomalyCode::ANOMALY_STUCK_AHEAD); //11/10/26 new helper function
     }
 
-    if (strcmp(buff, "!FULL") == 0)
-    {
-      //FullDistHdgScan(false, 5, 45,false); //11/10/26 new helper function
-      FullDistHdgScan(false); //11/10/26 new helper function
-    }
-
     if (strcmp(buff, "!STUCK_AHEAD_CLEAR") == 0)
     {
       gl_AnomalyCode = AnomalyCode::ANOMALY_NONE;
@@ -3268,7 +3256,6 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec, bool stopAtEnd) //11/07
   tgt_deg = b_ccw ? IMUHdgValDeg + numDeg : IMUHdgValDeg - numDeg;
 #else
   tgt_deg = b_ccw ? IMUHdgValDeg - numDeg : IMUHdgValDeg + numDeg;
-  gl_pSerPort->printf("SpinTurn(%2.2f), IMUHdgValDeg = %2.2f, tgt_deg = %2.f\n", numDeg, IMUHdgValDeg, tgt_deg);
 
 #endif // MPU6050_CCW_INCREASES_YAWVAL
 
@@ -3276,14 +3263,12 @@ bool SpinTurn(bool b_ccw, float numDeg, float degPersec, bool stopAtEnd) //11/07
   if (tgt_deg < -180)
   {
     tgt_deg += 360;
-    gl_pSerPort->printf("SpinTurn(%2.2f), IMUHdgValDeg = %2.2f, tgt_deg = %2.f\n", numDeg, IMUHdgValDeg, tgt_deg);
   }
 
   //07/29/19 bugfix
   if (tgt_deg > 180)
   {
     tgt_deg -= 360;
-    gl_pSerPort->printf("SpinTurn(%2.2f), IMUHdgValDeg = %2.2f, tgt_deg = %2.f\n", numDeg, IMUHdgValDeg, tgt_deg);
   }
 
   //DEBUG!!
@@ -4074,328 +4059,6 @@ void InitHeadingHistoryArray()
 
 }
 
-bool FullDistHdgScan(bool b_ccw, float numDeg, float degPersec, bool stopAtEnd) //11/07/26 added stopAtEnd argument (default = true)
-{
-  //Purpose: Make a full 360-deg Dist/Hdg Scan
-  //Inputs:
-  //	b_ccw - True if turn is to be ccw, false otherwise
-  //	numDeg - angle to be swept out in the turn
-  //	ROLLING_TURN_MAX_SEC_PER_DEG = const used to generate timeout proportional to turn deg
-  //	IMUHdgValDeg = IMU heading value updated by UpdateIMUHdgValDeg() //11/02/20 now updated in ISR
-  //	degPerSec = float value denoting desired turn rate
-  //  stopAtEnd = bool denoting whether or not the motors stop at the end or revert to the calling state
-  //Plan:
-  //	Step1: Get current heading as starting point
-  //	Step4: Run motors until target reached, using inline PID algorithm to control turn rate
-  //  Step5: For each numDeg degrees, copy current heading and VL53L1X dist to array
-  //Notes:
-  //	11/18/26 copied from SpinTurn() and modified for a single 360-deg scan
-
-  float tgt_deg;
-  float timeout_sec;
-  bool bDoneTurning = false;
-  bool bTimedOut = false;
-  bool bResult = true; //04/21/20 added so will be only one exit point
-
-  //11/07/26 store starting motor speeds & dirs in case it is needed at end.
-  uint16_t leftmotorspeed = gl_Leftspeednum;
-  uint16_t rightmotorspeed = gl_Rightspeednum;
-  bool b_RightMotorForward = IsRightMotorForward();
-  bool b_LeftMotorForward = IsLeftMotorForward();
-
-  gl_pSerPort->printf("FullDistHdgScan(b_ccw = %s, numDeg = %2.2f, degPersec = %2.2f, stopAtEnd = %s)\n",
-    b_ccw ? "True" : "False", numDeg, degPersec, stopAtEnd ? "True" : "False");
-
-  //make sure numDeg is large enough so 360 scan fits in array
-  float minNumDeg = 360 / RUN_TO_DAYLIGHT_ARRAY_SIZE;
-  numDeg = abs(numDeg);//  03/22/22 added to ensure numDeg >= 0
-  if (numDeg < minNumDeg)
-  {
-    gl_pSerPort->printf("numDeg = %2.2f is too small for RUN_TO_DAYLIGHT_ARRAY_SIZE (%d) - setting to %2.2f\n",
-      numDeg, RUN_TO_DAYLIGHT_ARRAY_SIZE, minNumDeg);
-
-    numDeg = minNumDeg;
-  }
-
-  //at this point, 360/numDeg is <= RUN_TO_DAYLIGHT_ARRAY_SIZE, so outer scan loop will fit
-  int loopCount = 360 / numDeg;
-  if (loopCount > RUN_TO_DAYLIGHT_ARRAY_SIZE)
-  {
-    loopCount = RUN_TO_DAYLIGHT_ARRAY_SIZE;
-  }
-
-  //DEBUG!!
-  //gl_pSerPort->printf("In FullDistHdgScan(%s, %2.2f, %2.2f) with PID = (%2.1f,%2.1f,%2.1f)\n",
-  //  b_ccw == TURNDIR_CCW ? "CCW" : "CW", numDeg, degPersec,
-  //  TurnRate_Kp, TurnRate_Ki, TurnRate_Kd);
-  //DEBUG!!
-
-  //no need to continue if the IMU isn't available
-  if (!dmpReady)
-  {
-    Serial.printf("DMP Failure - returning FALSE\n");
-    return false;
-  }
-
-  //Step1: Get current heading as starting point
-    //06/06/21 it is possible for IMU to return 180.00 on failure
-    //so try again.  If it really IS 180, then 
-    //it will eventually time out and go on
-
-  //08/26/21 re-wrote using 3-value array to make sure initial heading is a steady value
-  UpdateIMUHdgValDeg();
-
-  int retries = 0;
-  if ((IMUHdgValDeg == 180.f || IMUHdgValDeg == 0.f) && retries < 5)
-  {
-    //DEBUG!!
-    gl_pSerPort->printf("Got 180.00 or 0.00 exactly (%2.3f) from IMU - retrying %d...\n", IMUHdgValDeg, retries);
-    //DEBUG!!
-    UpdateIMUHdgValDeg();
-    retries++;
-    delay(100);
-  }
-
-  //Step2: Compute new target value & timeout value
-  timeout_sec = 2 * 360 / degPersec;
-
-  //12/05/19 added #define back in to manage which direction increases yaw values
-#ifdef MPU6050_CCW_INCREASES_YAWVAL
-  tgt_deg = b_ccw ? IMUHdgValDeg + numDeg : IMUHdgValDeg - numDeg;
-#else
-  tgt_deg = b_ccw ? IMUHdgValDeg - numDeg : IMUHdgValDeg + numDeg;
-  gl_pSerPort->printf("FullDistHdgScan(%2.2f), IMUHdgValDeg = %2.2f, tgt_deg = %2.f\n", numDeg, IMUHdgValDeg, tgt_deg);
-
-#endif // MPU6050_CCW_INCREASES_YAWVAL
-
-  //correct for -180/180 transition
-  if (tgt_deg < -180)
-  {
-    tgt_deg += 360;
-    gl_pSerPort->printf("FullDistHdgScan(%2.2f), IMUHdgValDeg = %2.2f, tgt_deg = %2.f\n", numDeg, IMUHdgValDeg, tgt_deg);
-  }
-
-  //07/29/19 bugfix
-  if (tgt_deg > 180)
-  {
-    tgt_deg -= 360;
-    gl_pSerPort->printf("FullDistHdgScan(%2.2f), IMUHdgValDeg = %2.2f, tgt_deg = %2.f\n", numDeg, IMUHdgValDeg, tgt_deg);
-  }
-
-  //DEBUG!!
-  //  gl_pSerPort->printf("FullDistHdgScan: Init hdg = %4.2f deg, Turn = %4.2f  deg, tgt = %4.2f deg, timeout = %4.2f sec\n\n",
-  //    IMUHdgValDeg, numDeg, tgt_deg, timeout_sec);
-  //DEBUG!!
-
-
-
-  float FrontD[RUN_TO_DAYLIGHT_ARRAY_SIZE];
-  float Hdg[RUN_TO_DAYLIGHT_ARRAY_SIZE];
-  ulong Msec[RUN_TO_DAYLIGHT_ARRAY_SIZE];
-
-
-  //for each numDeg degrees, capture a Dist/Hdg tuple into run to daylight array
-  UpdateIMUHdgValDeg();
-  tgt_deg = IMUHdgValDeg + numDeg; //bump the target for initial pass
-  gl_pSerPort->printf("%lu: In FullDistHdgScan() before loop() with cur_Deg = %2.1f,  tgt_Deg = %2.1f\n",
-    millis(), IMUHdgValDeg, tgt_deg);
-
-
-  for (size_t i = 0; i < loopCount; i++)
-  {
-    //gl_pSerPort->printf("%lu: FullDistHdgScan() top of loop with i = %d, cur_Deg = %2.1f,  tgt_Deg = %2.1f\n", 
-    //  millis(), i, IMUHdgValDeg, tgt_deg);
-    float curHdgMatchVal = 0;
-
-    //09/08/18 added to bolster end-of-turn detection
-    float prevHdgMatchVal = 0;
-    float matchSlope = 0;
-
-    Prev_HdgDeg = IMUHdgValDeg; //06/10/21 synch Prev_HdgDeg & IMUHdgValDeg just before entering loop
-
-    elapsedMillis mSecSinceTurnStart = 0;
-    MsecSinceLastTurnRateUpdate = 0;
-    float lastError = 0;
-    float lastInput = 0;
-    float lastIval = 0;
-    float lastDerror = 0;
-    //bool bFirstIMUHdg = true;
-
-    //DEBUG!!
-    //gl_pSerPort->printf("Msec\tHdg\tPrvHdg\tdHdg\tRate\ttgtDPS\terr\tKp*err\tIval\tKd*Derr\tspeed\tMatch\tSlope\n");
-    //DEBUG!!
-
-    float avgrate = 0;
-    uint16_t numrates = 0;
-    gl_bCFUI_Abort = false; //09/22/26 added to prevent FullDistHdgScan() run-on after '5' sent to CheckForUserInput()
-    uint32_t StartMilliSec = millis(); //added 11/14/26 for debugging 
-
-    //this loop is now for each for each of N numDeg sections
-    bDoneTurning = false;
-    while (!bDoneTurning && !bTimedOut && !gl_bCFUI_Abort)//rev 09/22/26 to add gl_bCFUI_Abort
-    {
-      //11/06/20 now just loops between PID calcs
-      CheckForUserInput();
-      //gl_pSerPort->printf("RearCm = %3.2f\n", GetFrontDistCm());
-
-      if (MsecSinceLastTurnRateUpdate >= TURN_RATE_UPDATE_INTERVAL_MSEC)
-      {
-        MsecSinceLastTurnRateUpdate = 0;
-
-        UpdateIMUHdgValDeg(); //update IMUHdgValDeg
-
-        float dHdg = IMUHdgValDeg - Prev_HdgDeg;
-
-        if (dHdg > 180)
-        {
-          Serial.printf("dHdg %2.2f > 180 - subtracting 360\n", dHdg);
-          dHdg -= 360;
-        }
-        else if (dHdg < -180)
-        {
-          Serial.printf("dHdg %2.2f < -180 - adding 360\n", dHdg);
-          dHdg += 360;
-        }
-
-        //watch for turn rates that are wildly off
-        //added 10/03/26 to skip bad heading values
-        float rate = abs(1000 * dHdg / TURN_RATE_UPDATE_INTERVAL_MSEC);
-        if (abs(rate) > 4 * degPersec)
-        {
-          Serial.printf("%lu: Skipping bad hdg %2.2f.  dHdg = %2.2f, rate = %2.2f, degPerSec = %2.2f\n",
-            millis(), IMUHdgValDeg, dHdg, rate, degPersec);
-          Prev_HdgDeg = IMUHdgValDeg; //re-synch prev to curr hdg for next time
-
-          continue; //skip this heading reading
-        }
-        avgrate += rate;
-        numrates++;
-
-        //if (rate > 3 * degPersec)
-        //{
-        //	//DEBUG!!
-        //Serial.printf("hdg/prevhdg/dHdg/rate = %2.2f\t%2.2f\t%2.2f\t%2.2f, excessive rate - replacing with %2.2f\n", IMUHdgValDeg, Prev_HdgDeg, dHdg, rate, degPersec);
-        //	//DEBUG!!
-        	//rate = degPersec;
-        //}
-
-        //02/05/22 sampleTime removed from signature
-        TurnRatePIDOutput = PIDCalcs(rate, degPersec, lastError, lastInput, lastIval, lastDerror, TurnRate_Kp, TurnRate_Ki, TurnRate_Kd);
-
-        int speed = 0;
-
-        //05/31/22 now using MOTOR_SPEED_HALF for max motor speed
-        //06/01/22 and MOTOR_SPEED_OFF for low end
-        speed = (TurnRatePIDOutput > MOTOR_SPEED_HALF) ? MOTOR_SPEED_HALF : (int)TurnRatePIDOutput;
-        speed = (TurnRatePIDOutput <= MOTOR_SPEED_OFF) ? MOTOR_SPEED_OFF : (int)TurnRatePIDOutput;
-
-        SetLeftMotorDirAndSpeed(!b_ccw, speed);
-        SetRightMotorDirAndSpeed(b_ccw, speed);
-
-        //check for nearly there and all the way there
-        curHdgMatchVal = GetHdgMatchVal(tgt_deg, IMUHdgValDeg);
-        matchSlope = curHdgMatchVal - prevHdgMatchVal;
-
-        //DEBUG!!
-        //gl_pSerPort->printf("%lu\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%2.2f\t%d\t%2.2f\t%2.2f\n",
-        //  millis(),
-        //  IMUHdgValDeg,
-        //  Prev_HdgDeg,
-        //  dHdg,
-        //  rate,
-        //  degPersec,
-        //  lastError,
-        //  TurnRate_Kp * lastError,
-        //  lastIval,
-        //  TurnRate_Kd * lastDerror,
-        //  speed,
-        //  curHdgMatchVal,
-        //  matchSlope);
-    /*    gl_pSerPort->printf("%lu\t%2.2f\t%d\n",
-          millis(),
-          rate,
-          speed);
-    */    //DEBUG!!
-
-        Prev_HdgDeg = IMUHdgValDeg; //re-synch prev to curr hdg for next time
-
-        //look for full match
-        bDoneTurning = (curHdgMatchVal >= HDG_FULL_MATCH_VAL
-          || (prevHdgMatchVal >= HDG_MIN_MATCH_VAL && matchSlope <= -0.01)); //have to use < vs <= as slope == 0 at start
-
-        //Serial.printf("curHdgMatchVal = %2.2f, prevHdgMatchVal = %2.2f, matchslope = %2.2f, bDoneTurning = %d\n",
-        //  curHdgMatchVal,
-        //  prevHdgMatchVal,
-        //  matchSlope,
-        //  bDoneTurning);
-
-        prevHdgMatchVal = curHdgMatchVal; //07/31/21 moved below bDoneTurning chk so can use prevHdgMatchVal vs curHdgMatchVal in slope check
-
-        bTimedOut = (mSecSinceTurnStart > timeout_sec * 1000);
-
-        if (bTimedOut)
-        {
-          //DEBUG!!
-          UpdateIMUHdgValDeg(); //09/13/26 added to make sure IMUHdgValDeg printout value is valid
-          gl_pSerPort->printf("%lu: timed out after %lu mSec with yaw = %3.2f, tgt = %3.2f, and match = %1.3f\n",
-            millis(), millis() - StartMilliSec, IMUHdgValDeg, tgt_deg, curHdgMatchVal);
-          //DEBUG!!
-
-          bResult = false;
-          break;
-        }
-
-        if (bDoneTurning)
-        {
-          //gl_pSerPort->printf("%lu: Completed turn in %lu mSec with hdg = %3.2f, tgt = %3.2f, and match = %1.3f\n", 
-          //  millis(), millis() - StartMilliSec, IMUHdgValDeg, tgt_deg, curHdgMatchVal);
-
-          //capture Hdg & Dist to arrays
-          Hdg[i] = UpdateIMUHdgValDeg();
-          FrontD[i] = GetFrontDistCm();
-          Msec[i] = millis();
-
-          //bResult = true;
-          //break;
-        }
-      }
-    }//while (!bDoneTurning && !bTimedOut && !gl_bCFUI_Abort)
-
-    avgrate = avgrate / numrates;
-
-    //gl_pSerPort->printf("average turn rate = %2.1f\n", avgrate);
-
-    //if (stopAtEnd)
-    //{
-    //  StopBothMotors();
-    //}
-    //else
-    //{
-    //  SetLeftMotorDirAndSpeed(b_LeftMotorForward, leftmotorspeed);
-    //  SetRightMotorDirAndSpeed(b_RightMotorForward, rightmotorspeed);
-    //}
-    //gl_pSerPort->printf("RearCm = %3.2f\n", GetFrontDistCm());
-
-    //gl_pSerPort->printf("Exiting FullDistHdgScan() with bResult = %d\n", bResult);
-    UpdateIMUHdgValDeg();
-    tgt_deg = IMUHdgValDeg + numDeg; //bump the target for next pass
-    //gl_pSerPort->printf("%lu: FullDistHdgScan() bottom of loop with i = %d, cur_Deg = %2.1f,  tgt_Deg = %2.1f\n",
-    //  millis(), i, IMUHdgValDeg, tgt_deg);
-
-   } //  for (size_t i = 0; i < loopCount; i++)
-//
-  //StopBothMotors();
-  gl_pSerPort->printf("After for() loop\n");
-
-  gl_pSerPort->printf("i\tMsec\tHdg\tFrontD\n");
-  for (size_t i = 0; i < RUN_TO_DAYLIGHT_ARRAY_SIZE; i++)
-  {
-    gl_pSerPort->printf("%d\t%lu:\t%2.1f\t%2.1f\n", i, Msec[i], Hdg[i], FrontD[i]);
-  }
-  StopBothMotors();
-  return true;
-}
-
 #pragma endregion HDG_BASED_TURN_SUPPORT
 
 #pragma region MISCELLANEOUS
@@ -4761,9 +4424,6 @@ void SendTelemetry()
 float GetFrontDistCm()
 {
   float dist = (float)lidar_Front.read() / 10.0;
- //DEBUG!!
-  //gl_pSerPort->printf("gl_FrontCm = %2.2f\n", dist);
- //DEBUG!!
   return dist;
 }
 
@@ -4824,11 +4484,8 @@ void RunToDaylightV2(const char* anomalystr)
 
     //11/13/26 bugfix. now array_size and step_deg are independent
     //SpinTurn(true, 360/ RUN_TO_DAYLIGHT_ARRAY_SIZE);
-    //SpinTurn(true, RUN_TO_DAYLIGHT_STEP_DEG);
-
-    FullDistHdgScan(true, 10);//full 360, 10 deg/collection, stop at end
+    SpinTurn(true, RUN_TO_DAYLIGHT_STEP_DEG);
   }
-
 
 //DEBUG!!
   //gl_pSerPort->printf("In RunToDaylightV2()\n");
@@ -4860,10 +4517,10 @@ void RunToDaylightV2(const char* anomalystr)
 }
 
 //added 10/14/26. For now it just calls GetFrontDistCm().  Can add rear distance later
-//void UpdateAllDistances()
-//{
-//  gl_FrontCm = GetFrontDistCm();
-//}
+void UpdateAllDistances()
+{
+  gl_FrontCm = GetFrontDistCm();
+}
 
 float UpdateFrontDistanceArray(float newdistval)
 {
