@@ -1102,6 +1102,7 @@ def perform_obstacle_recovery(active_anomaly: str = "obstacle_ahead"):
     """
     global recovery_in_progress, nav_enabled, last_speed_increment #11/12/26 bugfix
 
+    recovery_in_progress = True #11/20/26 added to prevent extraneous nav commands during recovery
     anomaly = active_anomaly.upper()          # e.g. "OBSTACLE_AHEAD"
     log(f"{anomaly} recovery starting")
 
@@ -1126,7 +1127,6 @@ def perform_obstacle_recovery(active_anomaly: str = "obstacle_ahead"):
 
         send_nav_cmd(f"T{best_hdg:.1f}", "turn to recovery heading",
                     force=True, wait=True)
-        last_speed_increment = 0
 
         send_nav_seq([
             ("5", "stop"),
@@ -1148,6 +1148,8 @@ def perform_obstacle_recovery(active_anomaly: str = "obstacle_ahead"):
 
     recovery_in_progress = False
     nav_enabled = True
+    last_speed_increment = 0
+
     log(f"{anomaly} recovery complete — resuming nav")
     return True
 # ----------------------------------------------------------------------
