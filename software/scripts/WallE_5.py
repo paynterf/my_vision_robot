@@ -67,7 +67,8 @@ SECONDS_PER_DAY = 86400 #24 * 60 * 60
 NAV_TOPIC = "/clearest_direction"
 NAV_COMMAND_INTERVAL_SEC = 0.8
 NAV_DEADBAND_DEG = 15.0   # was 6.0; includes 0° and ±10° (12:00, 11:00, 1:00)
-NAV_MAX_SPEED_INCREMENT = 1.0 #added 09/03/26
+#NAV_MAX_SPEED_INCREMENT = 1.0 #added 09/03/26
+NAV_MAX_SPEED_INCREMENT = 2.0 #rev 11/23/26
 NAV_DEFAULT_TURN_RATE_DEGPERSEC = 45.0 #must match teensy DEFAULT_TURN_RATE_DEGPERSEC
 NAV_HANDSHAKE_PREFIXES = ("L", "R", "0", "1", "T", "5", "!" )  # add others if firmware blocks on them
 NAV_SEQ_CONTINUE_ON_FW_ABORT = True
@@ -122,6 +123,12 @@ clearest_count = 0
 
 #10/24/26 part of '!STUCK_AHEAD' implementation
 global bestWidth, bestStart, bestEnd, numruns, runStart
+
+recovery_in_progress = False  # prevent nav during stuck/obstacle recovery
+
+#11/23/26 used to hold result of "!TEENSY_SPEEDS" query
+reported_left_speed = 0
+reported_right_speed = 0
 
 
 # ----------------------------------------------------------------------
@@ -203,6 +210,7 @@ def telemetry_loop():
     collecting = False
 
     global telemetry_running, ser, latest_imu_hdg
+    global reported_left_speed, reported_right_speed
 
     TELEMETRY_LOG.parent.mkdir(parents=True, exist_ok=True)
 
@@ -250,6 +258,15 @@ def telemetry_loop():
                             try:
                                 teensy_time = int(body.split("=")[1].strip().split()[0])
                                 log(f"Teensy time: {teensy_time} msec")
+                            except (ValueError, IndexError):
+                                pass
+
+                        if body.startswith("!TEENSY_SPEEDS"):
+                            try:
+                                parts = body.split("=")[1].strip().replace(",", " ").split()
+                                reported_left_speed = int(parts[0])
+                                reported_right_speed = int(parts[1])
+                                log(f"Teensy Speeds: {reported_left_speed}, {reported_right_speed}")
                             except (ValueError, IndexError):
                                 pass
 
@@ -586,7 +603,13 @@ def apply_nav_from_latest():
     D-steps are WallE delays — never sent to the Teensy.
     """
     global last_nav_cmd_time, last_nav_cmd_sent, last_speed_increment
-    global last_no_data_count, last_too_close_count
+    global last_no_data_count, last_too_close_count, recovery_in_progress
+
+    #11/22/26 bugfix - prevents nav cmds from spamming obstacle/stuck recovery
+    if recovery_in_progress:
+        log("Recovery in progress – skipping nav")
+        return
+
 
     if not nav_enabled or latest_clearest is None:
         return
@@ -621,6 +644,7 @@ def apply_nav_from_latest():
             elif turn_deg < 0:
                 # non-stopping left tweak; magnitude is |turn_deg| clamped for safety
                 mag = min(abs(turn_deg), NAV_MAX_TWEAK_DEG) 
+                ensure_moving_before_tweak()
                 send_nav_cmd(
                     f"!TWEAK_L{mag:.1f}",
                     f"left tweak {mag:.1f} (turn_deg={turn_deg:.1f})",
@@ -628,6 +652,7 @@ def apply_nav_from_latest():
                 )
             else:
                 mag = min(abs(turn_deg), NAV_MAX_TWEAK_DEG)
+                ensure_moving_before_tweak()
                 send_nav_cmd(
                     f"!TWEAK_R{mag:.1f}",
                     f"right tweak {mag:.1f} (turn_deg={turn_deg:.1f})",
@@ -706,26 +731,21 @@ def enter_manual_mode(reason: str = "manual override"):
     prompt(f"MANUAL mode – {reason}")
 
 def enter_auto_mode(reason: str = "auto"):
-    """WallE AUTO only. Teensy must already be in the command menu."""
-    log(f"Entering AUTO mode – {reason}: obstacle_ahead_event={obstacle_ahead_event.is_set()}")
+    log(f"Entering AUTO mode – {reason}")
     global nav_enabled, last_nav_cmd_sent, last_speed_increment
     nav_enabled = True
     last_nav_cmd_sent = None
-    send_raw("!RESET_FRONT_ARRAY") #reset front array to clear any stuck readings
 
-    #11/11/26 added to check for anomalies before entering AUTO mode
-    if obstacle_ahead_event.is_set():
-        perform_obstacle_recovery("obstacle_ahead")
-        obstacle_ahead_event.clear()
-        return
+    send_raw("!RESET_FRONT_ARRAY")
+    stuck_ahead_event.clear()
+    obstacle_ahead_event.clear()
+    get_teensy_timestamp(reason) #added 11/22/26 to help synch logs
 
-    #normal startup sequence
-    last_speed_increment = 1 #only one 'speedup' allowed
-    send_raw("/") #make sure robot is in forward mode when entering AUTO mode
-    send_raw("8") #make sure robot is moving forward when entering AUTO mode
+
+    last_speed_increment = 0
+    send_raw("/")          # direction only
     log(f"AUTO NAV – {reason}")
-#    prompt(f"AUTO NAV – {reason}")
-
+    
 def try_auto_nav():
     if not AUTO_NAV_ON_START:
         log("AUTO_NAV_ON_START is False – staying manual")
@@ -959,6 +979,8 @@ def send_nav_seq(steps, reason):
     """Run a recovery sequence. Each non-D step waits for Teensy DONE."""
     global nav_enabled
 
+    get_teensy_timestamp(reason) #added 11/22/26 to help synch logs
+
     log(f"NAV SEQUENCE: {reason}")
     for cmd, step_reason in steps:
         token = (cmd or "").strip()
@@ -1093,6 +1115,13 @@ def drain_scan_queue():
         except queue.Empty:
             break
 
+def get_teensy_timestamp(reason: str = ""):
+    """Request a Teensy timestamp so nav.log and telemetry.log can be aligned."""
+    send_raw("!TEENSY_TIME")
+    if reason and LOG_LEVEL >= LOG_VERBOSE:
+        log(f"Teensy time stamp requested ({reason})")
+
+
 #11/11/26 added to perform obstacle recovery if obstacle_ahead_event is set        
 def perform_obstacle_recovery(active_anomaly: str = "obstacle_ahead"):
     """
@@ -1105,8 +1134,7 @@ def perform_obstacle_recovery(active_anomaly: str = "obstacle_ahead"):
     recovery_in_progress = True #11/20/26 added to prevent extraneous nav commands during recovery
     anomaly = active_anomaly.upper()          # e.g. "OBSTACLE_AHEAD"
     log(f"{anomaly} recovery starting")
-
-    # 1. Stop and prepare
+    
     send_nav_seq([
         ("5", "stop"),
         ("!RESET_FRONT_ARRAY", "reset front array"),
@@ -1132,8 +1160,8 @@ def perform_obstacle_recovery(active_anomaly: str = "obstacle_ahead"):
             ("5", "stop"),
             (f"!{anomaly}_CLEAR", f"clear {anomaly} state"),
             ("!RESET_FRONT_ARRAY", "reset front array"),
-            ("!FORWARD", "forward"),
-            ("8", "speed up")
+            ("!FORWARD", "forward")#,
+            # ("8", "speed up")
         ], "restart navigation")
                     
     # Clear whichever event we just handled, plus any that arrived during the scan/turn
@@ -1152,6 +1180,16 @@ def perform_obstacle_recovery(active_anomaly: str = "obstacle_ahead"):
 
     log(f"{anomaly} recovery complete — resuming nav")
     return True
+
+def ensure_moving_before_tweak():
+    """If Teensy speed is 0, send one 8 so the subsequent TWEAK has something to steer."""
+
+    global last_speed_increment
+    send_raw("!TEENSY_SPEEDS")
+    # ... wait for and parse the reply into reported_speed ...
+    if reported_left_speed == 0 and reported_right_speed == 0 and last_speed_increment < NAV_MAX_SPEED_INCREMENT:
+        send_raw("8")
+        last_speed_increment = 1
 # ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
@@ -1211,7 +1249,8 @@ def main():
     # 7. Interactive loop
     last_repeat_cmd = None
 
-    recovery_in_progress = False  # prevent nav during stuck-ahead recovery
+
+    #recovery_in_progress = False  # prevent nav during stuck-ahead recovery
 
     while True:
         user = None
@@ -1244,8 +1283,8 @@ def main():
                                  
                 # drop any !Stuck_Ahead that arrived during the scan/turn
                 stuck_ahead_event.clear()
-                recovery_in_progress = False
-                nav_enabled = True
+                # recovery_in_progress = False
+                # nav_enabled = True
 
         if obstacle_ahead_event.is_set():
             #obstacle_ahead_event.clear()
@@ -1257,8 +1296,8 @@ def main():
                     
                 # drop any !Obstacle_Ahead that arrived during the scan/turn
                 obstacle_ahead_event.clear()
-                recovery_in_progress = False
-                nav_enabled = True
+                # recovery_in_progress = False
+                # nav_enabled = True
 
         if user is None:
             continue
@@ -1289,7 +1328,8 @@ def main():
             log(f"Received {user}: Resuming AUTO navigation...")
             print("Resuming AUTO navigation...")
             enter_auto_mode("operator resume auto-nav")
-            send_raw("!TEENSY_TIME")
+            #send_raw("!TEENSY_TIME")
+            get_teensy_timestamp("Resuming AUTO navigation")
             last_repeat_cmd = None
         elif low in ("5", "stop"):
             send_raw("5")
